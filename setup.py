@@ -21,5 +21,6 @@ setup(name="stravaweblib",
           "Topic :: Software Development :: Libraries :: Python Modules"
       ],
       packages=["stravaweblib"],
-      install_requires=["stravalib>=0.6.6,<1.0.0", "beautifulsoup4>=4.6.0,<5.0.0"]
+      install_requires=["stravalib>=0.6.6,<1.0.0", "html5lib<1.0.0",
+                        "beautifulsoup4>=4.6.0,<5.0.0"]
 )

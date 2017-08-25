@@ -12,7 +12,6 @@ from bs4 import BeautifulSoup
 __all__ = ["WebClient", "FrameType"]
 
 
-CSRF_REGEX = re.compile('<meta content="([^"]+)"')
 BASE_URL = "https://www.strava.com"
 
 
@@ -71,19 +70,19 @@ class WebClient(stravalib.Client):
         session_url = "{}/session".format(BASE_URL)
 
         # Get CSRF token
-        csrf_name, csrf_value = None, None
-        ret = self._session.get(login_url)
-        for line in ret.text.splitlines():
-            if "csrf-param" in line:
-                csrf_name = CSRF_REGEX.search(line).group(1)
-            elif "csrf-token" in line:
-                csrf_value = CSRF_REGEX.search(line).group(1)
+        login_html = self._session.get(login_url).text
+        soup = BeautifulSoup(login_html, 'html5lib')
 
-        if not csrf_name or not csrf_value:
+        try:
+            head = soup.head
+            csrf_param = head.find('meta', attrs={"name": "csrf-param"})['content']
+            csrf_token = head.find('meta', attrs={"name": "csrf-token"})['content']
+        except TypeError:
+            # "TypeError: NoneType has no attr..." in the case of failure to find tags
             raise stravalib.exc.LoginFailed("Couldn't find CSRF token")
 
         post_info = {
-            csrf_name: csrf_value,
+            csrf_param: csrf_token,
             "email": email,
             "password": password,
             "remember_me": "on",
@@ -148,7 +147,7 @@ class WebClient(stravalib.Client):
         if resp.status_code != 200:
             raise Exception("Failed to load bike details page")
 
-        soup = BeautifulSoup(resp.text, 'html.parser')
+        soup = BeautifulSoup(resp.text, 'html5lib')
         for table in soup.find_all('table'):
             if table.find('thead'):
                 break
