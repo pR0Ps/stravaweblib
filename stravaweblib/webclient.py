@@ -75,10 +75,11 @@ class WebClient(stravalib.Client):
 
         try:
             head = soup.head
-            csrf_param = head.find('meta', attrs={"name": "csrf-param"})['content']
-            csrf_token = head.find('meta', attrs={"name": "csrf-token"})['content']
-        except TypeError:
-            # "TypeError: NoneType has no attr..." in the case of failure to find tags
+            csrf_param = head.find('meta', attrs={"name": "csrf-param"}).attrs['content']
+            csrf_token = head.find('meta', attrs={"name": "csrf-token"}).attrs['content']
+        except (AttributeError, KeyError):
+            # "AttributeError: 'NoneType' object has no attr..." when failing
+            # to find the tags.
             raise stravalib.exc.LoginFailed("Couldn't find CSRF token")
 
         post_info = {
