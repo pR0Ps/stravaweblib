@@ -3,7 +3,7 @@
 from setuptools import setup
 
 setup(name="stravaweblib",
-      version="0.0.1",
+      version="0.0.2",
       description="Extends the Strava v3 API using web scraping",
       url="https://github.com/pR0Ps/stravaweblib",
       license="MPLv2",
