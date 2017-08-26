@@ -116,7 +116,7 @@ class WebClient(stravalib.Client):
         filename = cgi.parse_header(content_disposition)[1].get('filename')
 
         # Return the filename and an iterator to download the file with
-        return filename, ret.iter_content(chunk_size=16384)
+        return filename, resp.iter_content(chunk_size=16384)
 
     def _parse_date(self, date_str):
         if not date_str:
