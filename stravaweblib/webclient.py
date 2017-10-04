@@ -112,12 +112,12 @@ class WebClient(stravalib.Client):
         if ret.status_code != 302 or ret.headers['location'] == login_url:
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
 
-    def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL,
+    def get_activity_data(self, activity, fmt=DataFormat.ORIGINAL,
                           json_fmt=None):
-        """Get a file containing the activity data
+        """Get a file containing the provided activity's data
 
-        This can either be the original file that was uploaded, a GPX file, or
-        a TCX file.
+        The data can either be the original file that was uploaded, a GPX file,
+        or a TCX file.
 
         The `fmt` param controls the format of the file. Accepted values are
         ('original', 'tcx', and 'gpx'). Defaults to 'original'.
@@ -126,6 +126,14 @@ class WebClient(stravalib.Client):
         format was 'original' and it returned a JSON blob (happens for uploads
         from the mobile apps). By default the JSON blob will be returned.
         """
+        if isinstance(activity, stravalib.model.Activity):
+            activity_id = activity.id
+        elif isinstance(activity, (str, int)):
+            activity_id = activity
+        else:
+            raise ValueError("Invalid `activity` parameter '{}'"
+                             "".format(activity))
+
         fmt = DataFormat.classify(fmt)
         url = "{}/activities/{}/export_{}".format(BASE_URL, activity_id, fmt)
         resp = self._session.get(url, stream=True, allow_redirects=False)
