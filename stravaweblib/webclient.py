@@ -112,7 +112,8 @@ class WebClient(stravalib.Client):
         if ret.status_code != 302 or ret.headers['location'] == login_url:
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
 
-    def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL):
+    def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL,
+                          json_fmt=None):
         """Get a file containing the activity data
 
         This can either be the original file that was uploaded, a GPX file, or
@@ -120,6 +121,10 @@ class WebClient(stravalib.Client):
 
         The `fmt` param controls the format of the file. Accepted values are
         ('original', 'tcx', and 'gpx'). Defaults to 'original'.
+
+        The `json_fmt` param controls the backup format to use if the requested
+        format was 'original' and it returned a JSON blob (happens for uploads
+        from the mobile apps). By default the JSON blob will be returned.
         """
         fmt = DataFormat.classify(fmt)
         url = "{}/activities/{}/export_{}".format(BASE_URL, activity_id, fmt)
@@ -129,6 +134,15 @@ class WebClient(stravalib.Client):
                                       "to download an activity"
                                       "".format(resp.status_code))
 
+        # In the case of downloading JSON, the Content-Type header will
+        # correctly be set to 'application/json'
+        if (json_fmt and fmt == DataFormat.ORIGINAL and
+                resp.headers['Content-Type'].lower() == 'application/json'):
+            if json_fmt == DataFormat.ORIGINAL.value:
+                raise ValueError("`json_fmt` parameter cannot be 'original'")
+            return self.get_activity_data(activity_id, fmt=json_fmt)
+
+
         # Get file name from request (if possible)
         content_disposition = resp.headers.get('content-disposition', "")
         filename = cgi.parse_header(content_disposition)[1].get('filename')
@@ -136,6 +150,9 @@ class WebClient(stravalib.Client):
         # Sane default for filename
         if not filename:
             filename = str(activity_id)
+
+        # Note that Strava always removes periods from the filename so if one
+        # exists we know it's for the extension
         if "." not in filename:
             if fmt == DataFormat.ORIGINAL:
                 ext = 'dat'
@@ -175,6 +192,7 @@ class WebClient(stravalib.Client):
 
         resp = self._session.get(url, allow_redirects=False)
         if resp.status_code != 200:
+            # TODO: Exception type
             raise Exception("Failed to load bike details page")
 
         soup = BeautifulSoup(resp.text, 'html5lib')
@@ -182,6 +200,7 @@ class WebClient(stravalib.Client):
             if table.find('thead'):
                 break
         else:
+            # TODO: Exception type
             raise Exception("Bike component table not found")
 
         components = []
