@@ -1,4 +1,5 @@
 import cgi
+from collections import namedtuple
 from datetime import date, datetime
 import functools
 import enum
@@ -9,10 +10,29 @@ import stravalib
 from bs4 import BeautifulSoup
 
 
-__all__ = ["WebClient", "FrameType"]
+__all__ = ["WebClient", "FrameType", "DataFormat"]
 
 
 BASE_URL = "https://www.strava.com"
+
+
+ActivityFile = namedtuple("ActivityFile", ("filename", "content"))
+
+
+class DataFormat(enum.Enum):
+    ORIGINAL = "original"
+    GPX = "gpx"
+    TCX = "tcx"
+
+    def __str__(self):
+        return str(self.value)
+
+    @classmethod
+    def classify(cls, value):
+        for x in cls:
+            if x.value == str(value):
+                return x
+        raise ValueError("Invalid format '{}'".format(value))
 
 
 class FrameType(enum.Enum):
@@ -92,7 +112,7 @@ class WebClient(stravalib.Client):
         if ret.status_code != 302 or ret.headers['location'] == login_url:
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
 
-    def get_activity_data(self, activity_id, fmt='original'):
+    def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL):
         """Get a file containing the activity data
 
         This can either be the original file that was uploaded, a GPX file, or
@@ -101,9 +121,7 @@ class WebClient(stravalib.Client):
         The `fmt` param controls the format of the file. Accepted values are
         ('original', 'tcx', and 'gpx'). Defaults to 'original'.
         """
-        if fmt not in ('original', 'tcx', 'gpx'):
-            raise ValueError("Invalid format '{}'".format(fmt))
-
+        fmt = DataFormat.classify(fmt)
         url = "{}/activities/{}/export_{}".format(BASE_URL, activity_id, fmt)
         resp = self._session.get(url, stream=True, allow_redirects=False)
         if resp.status_code != 200:
@@ -115,8 +133,19 @@ class WebClient(stravalib.Client):
         content_disposition = resp.headers.get('content-disposition', "")
         filename = cgi.parse_header(content_disposition)[1].get('filename')
 
+        # Sane default for filename
+        if not filename:
+            filename = str(activity_id)
+        if "." not in filename:
+            if fmt == DataFormat.ORIGINAL:
+                ext = 'dat'
+            else:
+                ext = fmt
+            filename = "{}.{}".format(filename, ext)
+
         # Return the filename and an iterator to download the file with
-        return filename, resp.iter_content(chunk_size=16384)
+        return ActivityFile(filename=filename,
+                            content=resp.iter_content(chunk_size=16384))
 
     def _parse_date(self, date_str):
         if not date_str:
