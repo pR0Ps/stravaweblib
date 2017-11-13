@@ -21,11 +21,11 @@ activities = client.get_activities()
 activity_id = activities[0].id
 
 # Get the filename and data stream for the activity data
-filename, activity_data = client.get_activity_data(activity_id, fmt='original')
+data = client.get_activity_data(activity_id, fmt=DataFormat.ORIGINAL)
 
 # Dump the activity data to disk
-with open(filename, 'wb') as f:
-    for chunk in activity_data:
+with open(data.filename, 'wb') as f:
+    for chunk in data.content:
         if not chunk:
             break
         f.write(chunk)
@@ -54,4 +54,4 @@ client.get_bike_components(bikes[0], date=datetime.now())
 
 License
 =======
-Licensed under the MPLv2
+Licensed under the [Mozilla Public License, version 2.0](https://www.mozilla.org/en-US/MPL/2.0)
