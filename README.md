@@ -11,9 +11,9 @@ Extra functionality
 Download activity files as GPX, TCX, or the original format they were uploaded in.
 
 ```python
-from stravaweblib import WebClient
+from stravaweblib import WebClient, DataFormat
 
-# Log in (requires actual email/password for the site)
+# Log in (requires API token and email/password for the site)
 client = WebClient(access_token=OAUTH_TOKEN, email=EMAIL, password=PASSWORD)
 
 # Get the first activity id (uses the normal stravalib API)
@@ -23,7 +23,7 @@ activity_id = activities[0].id
 # Get the filename and data stream for the activity data
 data = client.get_activity_data(activity_id, fmt=DataFormat.ORIGINAL)
 
-# Dump the activity data to disk
+# Save the activity data to disk
 with open(data.filename, 'wb') as f:
     for chunk in data.content:
         if not chunk:
@@ -38,7 +38,7 @@ Retrieve all components added to bikes. Can optionally only show components acti
 from stravaweblib import WebClient
 from datetime import datetime
 
-# Log in (requires actual email/password for the site)
+# Log in (requires API token and email/password for the site)
 client = WebClient(access_token=OAUTH_TOKEN, email=EMAIL, password=PASSWORD)
 
 # Get a list of bike the current user owns
