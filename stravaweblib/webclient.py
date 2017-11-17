@@ -82,9 +82,13 @@ class WebClient(stravalib.Client):
         if not email or not password:
             raise ValueError("'email' and 'password' kwargs are required")
 
-        self._session = requests.Session()
-        self._login(email, password)
+        self._csrf = {}
         self._component_data = {}
+        self._session = requests.Session()
+        self._session.headers.update({
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        })
+        self._login(email, password)
 
         # Init the normal stravalib client with remaining args
         super().__init__(*args, **kwargs)
@@ -108,15 +112,33 @@ class WebClient(stravalib.Client):
             # to find the tags.
             raise stravalib.exc.LoginFailed("Couldn't find CSRF token")
 
+        # Save csrf token to use throughout the session
+        self._csrf = {csrf_param: csrf_token}
         post_info = {
-            csrf_param: csrf_token,
             "email": email,
             "password": password,
             "remember_me": "on",
+            **self._csrf
         }
-        ret = self._session.post(session_url, data=post_info, allow_redirects=False)
-        if ret.status_code != 302 or ret.headers['location'] == login_url:
+        resp = self._session.post(session_url, allow_redirects=False, data=post_info)
+        if not resp.is_redirect or resp.next.url == login_url:
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
+
+    def delete_activity(self, activity_id):
+        """
+        Deletes the specified activity.
+
+        :param activity_id: The activity to delete.
+        :type activity_id: int
+        """
+        url = "{}/activities/{}".format(BASE_URL, activity_id)
+        resp = self._session.post(url, allow_redirects=False,
+                                  data={"_method": "delete", **self._csrf})
+
+        if not resp.is_redirect or resp.next.url != "{}/athlete/training".format(BASE_URL):
+            raise stravalib.exc.Fault(
+                "Failed to delete activity (status code: {})".format(resp.status_code),
+            )
 
     def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL,
                           json_fmt=None):

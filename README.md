@@ -31,6 +31,24 @@ with open(data.filename, 'wb') as f:
         f.write(chunk)
 ```
 
+### Delete activities
+Delete activities from the site. Note that this was previously possible via the API, but the
+endpoint has been [deprecated as of 2017-03-01](https://strava.github.io/api/v3/changelog/)
+
+```python
+from stravaweblib import WebClient
+
+# Log in (requires API token and email/password for the site)
+client = WebClient(access_token=OAUTH_TOKEN, email=EMAIL, password=PASSWORD)
+
+# Get the first activity id (uses the normal stravalib API)
+activities = client.get_activities()
+activity_id = activities[0].id
+
+# Delete the activity
+client.delete_activity(activity_id)
+```
+
 ### Get bike components
 Retrieve all components added to bikes. Can optionally only show components active at a certain date.
 
