@@ -10,7 +10,7 @@ import stravalib
 from bs4 import BeautifulSoup
 
 
-__all__ = ["WebClient", "FrameType", "DataFormat"]
+__all__ = ["WebClient", "FrameType", "DataFormat", "ActivityFile"]
 
 
 BASE_URL = "https://www.strava.com"
@@ -70,6 +70,12 @@ class WebClient(stravalib.Client):
 
         :param requests_session: (Optional) pass request session object.
         :type requests_session: requests.Session() object
+
+        :param email: The email of the account to log into
+        :type email: str
+
+        :param password: The password of the account to log into
+        :type password: str
         """
         email = kwargs.pop("email", None)
         password = kwargs.pop("password", None)
@@ -112,33 +118,38 @@ class WebClient(stravalib.Client):
         if ret.status_code != 302 or ret.headers['location'] == login_url:
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
 
-    def get_activity_data(self, activity, fmt=DataFormat.ORIGINAL,
+    def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL,
                           json_fmt=None):
-        """Get a file containing the provided activity's data
-
-        The data can either be the original file that was uploaded, a GPX file,
-        or a TCX file.
-
-        The `fmt` param controls the format of the file. Accepted values are
-        ('original', 'tcx', and 'gpx'). Defaults to 'original'.
-
-        The `json_fmt` param controls the backup format to use if the requested
-        format was 'original' and it returned a JSON blob (happens for uploads
-        from the mobile apps). By default the JSON blob will be returned.
         """
-        if isinstance(activity, stravalib.model.Activity):
-            activity_id = activity.id
-        elif isinstance(activity, (str, int)):
-            activity_id = activity
-        else:
-            raise ValueError("Invalid `activity` parameter '{}'"
-                             "".format(activity))
+        Get a file containing the provided activity's data
 
+        The returned data can either be the original file that was uploaded,
+        a GPX file, or a TCX file.
+
+        :param activity_id: The activity to retrieve.
+        :type activity_id: int
+
+        :param fmt: The format to request the data in
+                    (defaults to DataFormat.ORIGINAL).
+        :type fmt: :class:`DataFormat`
+
+        :param json_fmt: The backup format to request in the event that the
+                         `fmt` was DataFormat.ORIGINAL and the request returned
+                         a JSON blob (happens for uploads from mobile apps).
+                         Using `None` (default) will cause the JSON blob to be
+                         returned.
+        :type json_fmt: :class:`DataFormat` or None
+
+        :return: A namedtuple with `filename` and `content` attributes:
+                 - `filename` is the filename that Strava suggests for the file
+                 - `contents` is an iterator that yields file contents as bytes
+        :rtype: :class:`ActivityFile`
+        """
         fmt = DataFormat.classify(fmt)
         url = "{}/activities/{}/export_{}".format(BASE_URL, activity_id, fmt)
         resp = self._session.get(url, stream=True, allow_redirects=False)
         if resp.status_code != 200:
-            raise stravalib.exc.Fault("Status code '{}' recieved when trying "
+            raise stravalib.exc.Fault("Status code '{}' received when trying "
                                       "to download an activity"
                                       "".format(resp.status_code))
 
@@ -147,7 +158,7 @@ class WebClient(stravalib.Client):
         if (json_fmt and fmt == DataFormat.ORIGINAL and
                 resp.headers['Content-Type'].lower() == 'application/json'):
             if json_fmt == DataFormat.ORIGINAL.value:
-                raise ValueError("`json_fmt` parameter cannot be 'original'")
+                raise ValueError("`json_fmt` parameter cannot be DataFormat.ORIGINAL")
             return self.get_activity_data(activity_id, fmt=json_fmt)
 
 
@@ -184,32 +195,32 @@ class WebClient(stravalib.Client):
             return None
 
     @functools.lru_cache()
-    def _get_all_bike_components(self, bike):
-        """Get all bike components"""
+    def _get_all_bike_components(self, bike_id):
+        """
+        Get all components for the specified bike
 
-        if isinstance(bike, stravalib.model.Gear):
-            bike = bike.id
-        elif not isinstance(bike, str):
-            raise ValueError("Invalid bike type (must be stravalib.model.Bike or str)")
-
-        if not bike.startswith('b'):
+        :param bike_id: The id of the bike to retreive components for
+                        (must start with a "b")
+        :type bike_id: str
+        """
+        if not bike_id.startswith('b'):
             raise ValueError("Invalid bike id (must start with 'b')")
 
         # chop off the leading "b"
-        url = "{}/bikes/{}".format(BASE_URL, bike[1:])
+        url = "{}/bikes/{}".format(BASE_URL, bike_id[1:])
 
         resp = self._session.get(url, allow_redirects=False)
         if resp.status_code != 200:
-            # TODO: Exception type
-            raise Exception("Failed to load bike details page")
+            raise stravalib.exc.Fault(
+                "Failed to load bike details page (status code: {})".format(resp.status_code),
+            )
 
         soup = BeautifulSoup(resp.text, 'html5lib')
         for table in soup.find_all('table'):
             if table.find('thead'):
                 break
         else:
-            # TODO: Exception type
-            raise Exception("Bike component table not found")
+            raise ValueError("Bike component table not found in the HTML - layout update?")
 
         components = []
         for row in table.tbody.find_all('tr'):
@@ -237,14 +248,19 @@ class WebClient(stravalib.Client):
             })
         return components
 
-    def get_bike_components(self, bike, on_date=None):
-        """Get the components for the specified bike
-
-        If `on_date` is specified, only components on the bike on that date
-        will be returned. It must be a `datetime.date` or `datetime.date`
-        object.
+    def get_bike_components(self, bike_id, on_date=None):
         """
-        components = self._get_all_bike_components(bike)
+        Get components for the specified bike
+
+        :param bike_id: The id of the bike to retreive components for
+                        (must start with a "b")
+        :type bike_id: str
+
+        :param on_date: Only return components on the bike for this day. If
+                        `None`, return all components regardless of date.
+        :type on_date: None or datetime.date or datetime.datetime
+        """
+        components = self._get_all_bike_components(bike_id)
 
         # Filter by the on_date param
         if on_date:
