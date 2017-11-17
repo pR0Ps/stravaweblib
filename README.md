@@ -23,7 +23,7 @@ activity_id = activities[0].id
 # Get the filename and data stream for the activity data
 data = client.get_activity_data(activity_id, fmt=DataFormat.ORIGINAL)
 
-# Save the activity data to disk
+# Save the activity data to disk using the server-provided filename
 with open(data.filename, 'wb') as f:
     for chunk in data.content:
         if not chunk:
@@ -33,7 +33,7 @@ with open(data.filename, 'wb') as f:
 
 ### Delete activities
 Delete activities from the site. Note that this was previously possible via the API, but the
-endpoint has been [deprecated as of 2017-03-01](https://strava.github.io/api/v3/changelog/)
+endpoint has been [deprecated as of 2017-03-01](https://strava.github.io/api/v3/changelog/).
 
 ```python
 from stravaweblib import WebClient
@@ -59,15 +59,18 @@ from datetime import datetime
 # Log in (requires API token and email/password for the site)
 client = WebClient(access_token=OAUTH_TOKEN, email=EMAIL, password=PASSWORD)
 
-# Get a list of bike the current user owns
+# Get a list of bikes the current user owns
 athlete = client.get_athlete()
 bikes = athlete.bikes
 
+# Get the id of the first bike
+bike_id = bikes[0].id
+
 # Get all components of the first bike (past and present)
-client.get_bike_components(bikes[0])
+client.get_bike_components(bike_id)
 
 # Get the current components on the first bike
-client.get_bike_components(bikes[0], date=datetime.now())
+client.get_bike_components(bike_id, date=datetime.now())
 ```
 
 License
