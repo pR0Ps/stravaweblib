@@ -52,31 +52,8 @@ class WebClient(stravalib.Client):
     """
 
     def __init__(self, *args, **kwargs):
-        """
-        Initialize a new client object.
+        # Docstring set manually after class definition
 
-        :param access_token: The token that provides access to a specific Strava account.  If empty, assume that this
-                             account is not yet authenticated.
-        :type access_token: str
-
-        :param rate_limit_requests: Whether to apply a rate limiter to the requests. (default True)
-        :type rate_limit_requests: bool
-
-        :param rate_limiter: A :class:`stravalib.util.limiter.RateLimiter' object to use.
-                             If not specified (and rate_limit_requests is True), then
-                             :class:`stravalib.util.limiter.DefaultRateLimiter' will
-                             be used.
-        :type rate_limiter: callable
-
-        :param requests_session: (Optional) pass request session object.
-        :type requests_session: requests.Session() object
-
-        :param email: The email of the account to log into
-        :type email: str
-
-        :param password: The password of the account to log into
-        :type password: str
-        """
         email = kwargs.pop("email", None)
         password = kwargs.pop("password", None)
         if not email or not password:
@@ -292,3 +269,13 @@ class WebClient(stravalib.Client):
                     (c['added'] or date.min) <= on_date <= (c['removed'] or date.max)]
         else:
             return components
+
+# Inherit parent documentation for WebClient.__init__
+WebClient.__init__.__doc__ = stravalib.Client.__init__.__doc__ + \
+        """
+        :param email: The email of the account to log into
+        :type email: str
+
+        :param password: The password of the account to log into
+        :type password: str
+        """

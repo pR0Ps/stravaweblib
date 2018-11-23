@@ -33,7 +33,7 @@ with open(data.filename, 'wb') as f:
 
 ### Delete activities
 Delete activities from the site. Note that this was previously possible via the API, but the
-endpoint has been [deprecated as of 2017-03-01](https://strava.github.io/api/v3/changelog/).
+endpoint has been [deprecated as of 2017-03-01](https://developers.strava.com/docs/changelog/).
 
 ```python
 from stravaweblib import WebClient
