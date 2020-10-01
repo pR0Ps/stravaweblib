@@ -6,20 +6,90 @@ import enum
 import functools
 import json
 import time
+import uuid
 
 from bs4 import BeautifulSoup
 import requests
 import stravalib
+from stravalib.attributes import Attribute, TimestampAttribute, TimeIntervalAttribute
+from stravalib.model import Activity, BaseEntity
 
 
-__all__ = ["WebClient", "FrameType", "DataFormat", "ExportFile", "ActivityFile"]
+__all__ = ["WebClient", "ScrapingClient", "FrameType", "DataFormat", "ExportFile", "ActivityFile", "ScrapedActivity"]
 
 
 BASE_URL = "https://www.strava.com"
 
+# Used for filtering when scraping the activity list
+ACTIVITY_WORKOUT_TYPES = {
+    "Ride": {None: 10, "Race": 11, "Workout": 12},
+    "Run": {None: 0, "Race": 1, "Long Run": 2, "Workout": 3}
+}
 
 ExportFile = namedtuple("ExportFile", ("filename", "content"))
 ActivityFile = ExportFile  # TODO: deprecate and remove
+
+
+class ScrapingError(ValueError):
+    """An error that is retured when something fails during scraping
+
+    This can happen because something on the website changed.
+    """
+
+
+class ScrapedActivity(BaseEntity):
+    """
+    Represents an Activity (ride, run, etc.) that was scraped from the website
+
+    The attributes are compatible with stravalib.model.Activity where they exist
+    """
+
+    id = Attribute(int)
+    name = Attribute(str)
+    description = Attribute(str)
+    type = Attribute(str)
+    workout_type = Attribute(str)
+
+    start_date = TimestampAttribute()
+    distance = Attribute(float)
+    moving_time = TimeIntervalAttribute()
+    elapsed_time = TimeIntervalAttribute()
+    total_elevation_gain = Attribute(float)
+    suffer_score = Attribute(int)
+    calories = Attribute(float)
+    gear_id = Attribute(str)
+
+    # True if the activity has GPS coordinates
+    # False for trainers, manual activities, etc
+    has_latlng = Attribute(bool)
+
+    trainer = Attribute(bool)
+    commute = Attribute(bool)
+    private = Attribute(bool)
+    flagged = Attribute(bool)
+
+    def from_dict(self, d):
+        bike_id = d.pop("bike_id", None)
+        shoes_id = d.pop("athlete_gear_id", None)
+        if bike_id:
+            d["gear_id"] = "b{}".format(bike_id)
+        elif shoes_id:
+            d["gear_id"] = "g{}".format(shoes_id)
+
+        d["start_date"] = d.pop("start_time")
+        d["distance"] = d.pop("distance_raw")
+        d["moving_time"] = d.pop("moving_time_raw")
+        d["elapsed_time"] = d.pop("elapsed_time_raw")
+        d["total_elevation_gain"] = d.pop("elevation_gain_raw")
+
+        wt = d.pop("workout_type")
+        if d["type"] in ACTIVITY_WORKOUT_TYPES:
+            for k, v in ACTIVITY_WORKOUT_TYPES[d["type"]].items():
+                if wt == v:
+                    d["workout_type"] = k
+                    break
+
+        return super().from_dict(d)
 
 
 class DataFormat(enum.Enum):
@@ -48,10 +118,11 @@ class FrameType(enum.Enum):
         return str(self.name).replace("_", " ").title()
 
 
-class WebClient(stravalib.Client):
+class ScrapingClient:
     """
-    An extension to the stravalib Client that fills in some of the gaps in
-    the official API using web scraping.
+    A client that uses web scraping to interface with Strava.
+
+    Can be used as a mixin to add the extra methods to the main stravalib.Client
     """
 
     def __init__(self, *args, **kwargs):
@@ -75,19 +146,7 @@ class WebClient(stravalib.Client):
         else:
             raise ValueError("'jwt' or both of 'email' and 'password' are required")
 
-        # Init the normal stravalib client with remaining args
         super().__init__(*args, **kwargs)
-
-        # Verify that REST API and Web API correspond to the same Strava user account
-        if self.access_token is not None:
-            rest_id = str(self.get_athlete().id)
-            web_id = self._session.cookies.get('strava_remember_id')
-            if rest_id != web_id:
-                raise stravalib.exc.LoginFailed("API and web credentials are for different accounts")
-        else:
-            # REST API does not have an access_token (yet). Should we verify the match after
-            # exchange_code_for_token()?
-            pass
 
     @property
     def jwt(self):
@@ -155,6 +214,89 @@ class WebClient(stravalib.Client):
         if not resp.is_redirect or resp.next.url == "{}/login".format(BASE_URL):
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
 
+    def scrape_activities(self, keywords=None, activity_type=None, workout_type=None,
+                          commute=False, is_private=False, indoor=False, gear_id=None):
+        """A scraping-based alternative to stravalib.Client.get_activities()
+
+        Note that when using multiple parameters they are treated as AND, not OR
+
+        :param keywords: Text to search for
+        :param activity_type: The type of the activity. See stravalib.model:Activity.TYPES
+        :param workout_type: The type of workout ("Race", "Workout", etc)
+        :param commute: Only return activities marked as commutes
+        :param is_private: Only return private activities
+        :param indoor: Only return indoor/trainer activities
+        :param gear_id: Only return activities using this gear
+
+        :yield: ScrapedActivity objects
+        """
+
+        if activity_type is not None and activity_type not in Activity.TYPES:
+            raise ValueError(
+                "Invalid activity type. Must be one of: {}".format(",".join(Activity.TYPES))
+            )
+
+        if activity_type in ACTIVITY_WORKOUT_TYPES:
+            workout_type = ACTIVITY_WORKOUT_TYPES[activity_type].get(workout_type)
+            if workout_type is None:
+                raise ValueError(
+                    "Invalid workout type for a {}. Must be one of: {}".format(
+                        activity_type,
+                        ", ".join(ACTIVITY_WORKOUT_TYPES[activity_type].keys())
+                    )
+                )
+        elif workout_type is not None or gear_id is not None:
+            raise ValueError(
+                "Can only filter using workout type of gear when activity type is one of: {}".format(
+                    ", ".join(ACTIVITY_WORKOUT_TYPES.keys())
+                )
+            )
+
+        page = 1
+        per_page = 20
+        search_session_id = uuid.uuid4()
+
+        conv_bool = lambda x: "" if not x else "true"
+
+        while True:
+            resp = self._session.get(
+                "{}/athlete/training_activities".format(BASE_URL),
+                headers= {
+                    "Accept": "text/javascript, application/javascript, application/ecmascript, application/x-ecmascript",
+                    #"X-CSRF-Token": next(iter(self.csrf.values())),
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                params={
+                    "search_session_id": search_session_id,
+                    "page": page,
+                    "per_page": per_page,
+                    "keywords": keywords,
+                    "new_activity_only": "false",
+                    "activity_type": activity_type or "",
+                    "commute": conv_bool(commute),
+                    "private_activities": conv_bool(is_private),
+                    "trainer": conv_bool(indoor),
+                    "gear": gear_id or "",
+                }
+            )
+            if resp.status_code != 200:
+                raise stravalib.exc.Fault(
+                    "Failed to list activities (status code {})".format(resp.status_code)
+                )
+            try:
+                data = resp.json()["models"]
+            except (ValueError, TypeError, KeyError) as e:
+                raise ScrapingError(
+                    "Invalid JSON response from Strava"
+                ) from e
+
+            for activity in data:
+                yield ScrapedActivity(**activity)
+
+            # No results = stop requesting pages
+            if not data:
+                break
+
     def delete_activity(self, activity_id):
         """
         Deletes the specified activity.
@@ -201,8 +343,7 @@ class WebClient(stravalib.Client):
             content=resp.iter_content(chunk_size=16*1024)  # 16KB
         )
 
-    def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL,
-                          json_fmt=None):
+    def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL, json_fmt=None):
         """
         Get a file containing the provided activity's data
 
@@ -231,6 +372,9 @@ class WebClient(stravalib.Client):
         fmt = DataFormat.classify(fmt)
         url = "{}/activities/{}/export_{}".format(BASE_URL, activity_id, fmt)
         resp = self._session.get(url, stream=True, allow_redirects=False)
+
+        # Gives a 302 back to the activity URL when trying to export a manual activity
+        # TODO: Does this also happen with other errors?
         if resp.status_code != 200:
             raise stravalib.exc.Fault("Status code '{}' received when trying "
                                       "to download an activity"
@@ -246,7 +390,8 @@ class WebClient(stravalib.Client):
 
         return self._make_export_file(resp, activity_id)
 
-    def _parse_date(self, date_str):
+    @staticmethod
+    def _parse_date(date_str):
         if not date_str:
             return None
         if date_str.lower() == "since beginning":
@@ -254,7 +399,7 @@ class WebClient(stravalib.Client):
             return datetime.utcfromtimestamp(0).date()
         try:
             return datetime.strptime(date_str, "%b %d, %Y").date()
-        except ValueError as e:
+        except ValueError:
             return None
 
     @functools.lru_cache()
@@ -278,12 +423,15 @@ class WebClient(stravalib.Client):
                 "Failed to load bike details page (status code: {})".format(resp.status_code),
             )
 
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        for table in soup.find_all('table'):
-            if table.find('thead'):
+        soup = BeautifulSoup(resp.text, 'html5lib')
+        table = None
+        for t in soup.find_all('table'):
+            if t.find('thead'):
+                table = t
                 break
-        else:
-            raise ValueError("Bike component table not found in the HTML - layout update?")
+
+        if not table:
+            raise ScrapingError("Bike component table not found in the HTML - layout update?")
 
         components = []
         for row in table.tbody.find_all('tr'):
@@ -362,6 +510,15 @@ class WebClient(stravalib.Client):
 
         return self._make_export_file(resp, route_id)
 
+
+# Mix in the ScrapingClient to inherit all its methods
+class WebClient(ScrapingClient, stravalib.Client):
+    """
+    An extension to the stravalib Client that fills in some of the gaps in
+    the official API using web scraping.
+
+    Requires a JWT or both of email and password
+    """
 
 
 # Inherit parent documentation for WebClient.__init__
