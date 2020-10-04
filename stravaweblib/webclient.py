@@ -5,17 +5,22 @@ from datetime import date, datetime
 import enum
 import functools
 import json
+import re
 import time
 import uuid
 
 from bs4 import BeautifulSoup
 import requests
 import stravalib
-from stravalib.attributes import Attribute, TimestampAttribute, TimeIntervalAttribute
-from stravalib.model import Activity, BaseEntity
+from stravalib.attributes import (Attribute, TimestampAttribute,
+                                  TimeIntervalAttribute, LocationAttribute)
+from stravalib.model import Activity, BaseEntity, BoundEntity
 
 
-__all__ = ["WebClient", "ScrapingClient", "FrameType", "DataFormat", "ExportFile", "ActivityFile", "ScrapedActivity"]
+__all__ = [
+    "WebClient", "ScrapingClient", "FrameType", "DataFormat", "ExportFile",
+    "ActivityFile", "ScrapedActivity", "ScrapedPhoto"
+]
 
 
 BASE_URL = "https://www.strava.com"
@@ -25,6 +30,8 @@ ACTIVITY_WORKOUT_TYPES = {
     "Ride": {None: 10, "Race": 11, "Workout": 12},
     "Run": {None: 0, "Race": 1, "Long Run": 2, "Workout": 3}
 }
+
+PHOTOS_REGEX = re.compile(r"var photosJson\s*=\s*(\[.*\]);")
 
 ExportFile = namedtuple("ExportFile", ("filename", "content"))
 ActivityFile = ExportFile  # TODO: deprecate and remove
@@ -37,7 +44,38 @@ class ScrapingError(ValueError):
     """
 
 
-class ScrapedActivity(BaseEntity):
+class ScrapedPhoto(BaseEntity):
+    """Represents a photo scraped from Strava's activity details page
+
+    The attributes are compatible with stravalib.models.ActivityPhoto where
+    they exist.
+    """
+
+    unique_id = Attribute(str)
+    activity_id = Attribute(int)
+    athlete_id = Attribute(int)
+    caption = Attribute(str)
+
+    location = LocationAttribute()
+
+    urls = Attribute(dict) # dimension: url
+
+    def from_dict(self, d):
+        d["unique_id"] = d.pop("photo_id")
+        d["athlete_id"] = d.pop("owner_id")
+
+        # The caption has unicode escapes (ie. \uFFFF) embedded in the string
+        d["caption"] = d.pop("caption_escaped", "").encode("utf-8").decode("unicode_escape")
+        d["urls"] = {
+            str(min(dim.values())): d.pop(name)
+            for name, dim in d.pop("dimensions").items()
+        }
+        d["location"] = [d.pop("lat"), d.pop("lng")]
+
+        return super().from_dict(d)
+
+
+class ScrapedActivity(BoundEntity):
     """
     Represents an Activity (ride, run, etc.) that was scraped from the website
 
@@ -67,6 +105,20 @@ class ScrapedActivity(BaseEntity):
     commute = Attribute(bool)
     private = Attribute(bool)
     flagged = Attribute(bool)
+
+    _photos = None
+
+    @property
+    def photos(self):
+        """Returns a list of ScrapedPhoto objects"""
+        if self._photos is None:
+            self.assert_bind_client()
+            self._photos = self.bind_client.scrape_activity_photos(self.id)
+        return self._photos
+
+    @property
+    def total_photo_count(self):
+        return len(self.photos)
 
     def from_dict(self, d):
         bike_id = d.pop("bike_id", None)
@@ -214,6 +266,28 @@ class ScrapingClient:
         if not resp.is_redirect or resp.next.url == "{}/login".format(BASE_URL):
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
 
+    def scrape_activity_photos(self, activity_id):
+        """Get photos for an activity"""
+        resp = self._session.get("{}/activities/{}".format(BASE_URL, activity_id))
+        resp.raise_for_status()
+
+        soup = BeautifulSoup(resp.content, 'html5lib')
+        try:
+            script = next((x for x in soup.find_all("script") if "var photosJson" in x.text))
+        except StopIteration:
+            raise ScrapingError("Failed to find photo data in page")
+
+        m = PHOTOS_REGEX.search(script.text)
+        if not m:
+            raise ScrapingError("Failed to extract photo data from page")
+
+        try:
+            photos = json.loads(m.group(1))
+        except (TypeError, ValueError) as e:
+            raise ScrapingError("Failed to parse extracted photo data") from e
+
+        return [ScrapedPhoto(**p) for p in photos]
+
     def scrape_activities(self, keywords=None, activity_type=None, workout_type=None,
                           commute=False, is_private=False, indoor=False, gear_id=None):
         """A scraping-based alternative to stravalib.Client.get_activities()
@@ -291,7 +365,7 @@ class ScrapingClient:
                 ) from e
 
             for activity in data:
-                yield ScrapedActivity(**activity)
+                yield ScrapedActivity(bind_client=self, **activity)
 
             # No results = stop requesting pages
             if not data:
