@@ -3,6 +3,7 @@ import cgi
 from collections import namedtuple
 from datetime import date, datetime
 import enum
+import functools
 import json
 import re
 import time
@@ -112,7 +113,7 @@ class ScrapedActivity(BoundEntity):
         """Returns a list of ScrapedPhoto objects"""
         if self._photos is None:
             self.assert_bind_client()
-            self._photos = self.bind_client.scrape_activity_photos(self.id)
+            self._photos = self.bind_client.get_activity_photos(self.id)
         return self._photos
 
     @property
@@ -265,8 +266,13 @@ class ScrapingClient:
         if not resp.is_redirect or resp.next.url == "{}/login".format(BASE_URL):
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
 
-    def scrape_activity_photos(self, activity_id):
-        """Get photos for an activity"""
+    def get_activity_photos(self, activity_id):
+        """A scraping-based alternative to stravalib.Client.get_activity_photos
+
+        :param activity_id: The activity for which to fetch photos.
+
+        :return: A list of ScrapedPhoto objects
+        """
         resp = self._session.get("{}/activities/{}".format(BASE_URL, activity_id))
         resp.raise_for_status()
 
@@ -287,9 +293,10 @@ class ScrapingClient:
 
         return [ScrapedPhoto(**p) for p in photos]
 
-    def scrape_activities(self, keywords=None, activity_type=None, workout_type=None,
-                          commute=False, is_private=False, indoor=False, gear_id=None):
-        """A scraping-based alternative to stravalib.Client.get_activities()
+    def get_activities(self, keywords=None, activity_type=None, workout_type=None,
+                       commute=False, is_private=False, indoor=False, gear_id=None,
+                       before=None, after=None, limit=None):
+        """A scraping-based alternative to stravalib.Client.get_activities
 
         Note that when using multiple parameters they are treated as AND, not OR
 
@@ -300,6 +307,14 @@ class ScrapingClient:
         :param is_private: Only return private activities
         :param indoor: Only return indoor/trainer activities
         :param gear_id: Only return activities using this gear
+
+        Parameters for compatibility with stravalib.Client.get_activities:
+
+        :param before: Result will start with activities whose start date is
+                       before specified date. (UTC)
+        :param after: Result will start with activities whose start date is after
+                      specified value. (UTC)
+        :param limit: How many maximum activities to return.
 
         :yield: ScrapedActivity objects
         """
@@ -325,6 +340,10 @@ class ScrapingClient:
                 )
             )
 
+        before = stravalib.Client._utc_datetime_to_epoch(None, before or datetime.max)
+        after = stravalib.Client._utc_datetime_to_epoch(None, after or datetime.min)
+
+        num_yielded = 0
         page = 1
         per_page = 20
         search_session_id = uuid.uuid4()
@@ -364,11 +383,20 @@ class ScrapingClient:
                 ) from e
 
             for activity in data:
-                yield ScrapedActivity(bind_client=self, **activity)
+                # Respect the limit
+                if limit is not None and num_yielded >= limit:
+                    return
 
-            # No results = stop requesting pages
+                activity = ScrapedActivity(bind_client=self, **activity)
+
+                # Respect the before and after filters
+                if after < activity.start_date.timestamp() < before:
+                    yield activity
+                    num_yielded += 1
+
+            # No results = done
             if not data:
-                break
+                return
 
     def delete_activity(self, activity_id):
         """
@@ -583,8 +611,8 @@ class ScrapingClient:
         return self._make_export_file(resp, route_id)
 
 
-# Mix in the ScrapingClient to inherit all its methods
-class WebClient(ScrapingClient, stravalib.Client):
+
+class WebClient(stravalib.Client):
     """
     An extension to the stravalib Client that fills in some of the gaps in
     the official API using web scraping.
@@ -592,9 +620,18 @@ class WebClient(ScrapingClient, stravalib.Client):
     Requires a JWT or both of email and password
     """
 
+    def __new__(cls, *args, **kwargs):
+        self = super().__new__(cls)
 
-# Inherit parent documentation for WebClient.__init__
-WebClient.__init__.__doc__ = stravalib.Client.__init__.__doc__ + \
+        # Prepend __init__'s docstring with the parent classes one
+        cls.__init__.__doc__ = super().__init__.__doc__ + cls.__init__.__doc__
+
+        # Delegate certain methods and properties to the scraper instance
+        for fcn in ("delete_activity", "get_bike_components", "get_activity_data", "jwt", "csrf"):
+            setattr(cls, fcn, cls._delegate(ScrapingClient, fcn))
+        return self
+
+    def __init__(self, *args, **kwargs):
         """
         :param email: The email of the account to log into
         :type email: str
@@ -604,6 +641,7 @@ WebClient.__init__.__doc__ = stravalib.Client.__init__.__doc__ + \
 
         :param jwt: The JWT of an existing session.
                     If not specified, email and password are required.
+                    Can be accessed from the `.jwt` property.
         :type jwt: str
 
         :param csrf: A dict of the form: `{<csrf-param>: <csrf-token>}`.
@@ -611,3 +649,23 @@ WebClient.__init__.__doc__ = stravalib.Client.__init__.__doc__ + \
                      Can be accessed from the `.csrf` property.
         :type csrf: dict
         """
+        sc_kwargs = {
+            k: kwargs.pop(k, None) for k in ("email", "password", "jwt", "csrf")
+        }
+        self._scraper = ScrapingClient(**sc_kwargs)
+        super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _delegate(cls, name):
+        func = getattr(cls, name)
+        is_prop = isinstance(func, property)
+
+        @functools.wraps(func)
+        def delegator(self, *args, **kwargs):
+            if is_prop:
+                return getattr(self._scraper, name)
+            return getattr(self._scraper, name)(*args, **kwargs)
+
+        if is_prop:
+            delegator = property(delegator)
+        return delegator
