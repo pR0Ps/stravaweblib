@@ -483,19 +483,26 @@ class ScrapingClient:
 
         :param json_fmt: The backup format to request in the event that the
                          `fmt` was DataFormat.ORIGINAL and the request returned
-                         a JSON blob (happens for uploads from mobile apps).
-                         Using `None` (default) will cause the JSON blob to be
-                         returned.
-        :type json_fmt: :class:`DataFormat` or None
+                         a JSON blob (happens for uploads from older mobile apps).
+                         Using `DataFormat.ORIGINAL` will cause the JSON blob to
+                         be returned.
+                         (defaults to DataFormat.GPX)
+        :type json_fmt: :class:`DataFormat`
 
         :return: A namedtuple with `filename` and `content` attributes:
                  - `filename` is the filename that Strava suggests for the file
                  - `contents` is an iterator that yields file contents as bytes
         :rtype: :class:`ExportFile`
         """
-        fmt = DataFormat.classify(fmt)
-        url = "{}/activities/{}/export_{}".format(BASE_URL, activity_id, fmt)
-        resp = self._session.get(url, stream=True, allow_redirects=False)
+        __log__.debug("Getting data (in %s format) for activity %s", fmt, activity_id)
+
+        fmt = DataFormat(fmt)
+        json_fmt = DataFormat(json_fmt)
+        resp = self.request_get(
+            "activities/{}/export_{}".format(activity_id, fmt),
+            stream=True,
+            allow_redirects=False
+        )
 
         # Gives a 302 back to the activity URL when trying to export a manual activity
         # TODO: Does this also happen with other errors?
@@ -504,13 +511,12 @@ class ScrapingClient:
                                       "to download an activity"
                                       "".format(resp.status_code))
 
-        # In the case of downloading JSON, the Content-Type header will
-        # correctly be set to 'application/json'
-        if (json_fmt and fmt == DataFormat.ORIGINAL and
+        # When downloading JSON, the Content-Type header will set to 'application/json'
+        # If the json_fmt is not DataFormat.ORIGINAL, try the download again asking
+        # for the json_fmt.
+        if (fmt == DataFormat.ORIGINAL and json_fmt != fmt and
                 resp.headers['Content-Type'].lower() == 'application/json'):
-            if json_fmt == DataFormat.ORIGINAL.value:
-                raise ValueError("`json_fmt` parameter cannot be DataFormat.ORIGINAL")
-            return self.get_activity_data(activity_id, fmt=json_fmt)
+            return self.get_activity_data(activity_id, fmt=json_fmt, json_fmt=DataFormat.ORIGINAL)
 
         return self._make_export_file(resp, activity_id)
 
