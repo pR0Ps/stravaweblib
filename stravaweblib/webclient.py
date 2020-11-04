@@ -1,8 +1,8 @@
+#!/usr/bin/env python
 from base64 import b64decode
 import cgi
 from collections import namedtuple
-from datetime import date, datetime
-import enum
+from datetime import datetime
 import functools
 import json
 import logging
@@ -13,19 +13,14 @@ import uuid
 from bs4 import BeautifulSoup
 import requests
 import stravalib
-from stravalib.attributes import (Attribute, TimestampAttribute,
-                                  TimeIntervalAttribute, LocationAttribute)
-from stravalib.model import Activity, BaseEntity, BoundEntity
+from stravalib.model import Activity, Bike as _Bike
+from stravaweblib.model import (DataFormat, ScrapedShoe, Bike, ScrapedBike,
+                                ScrapedBikeComponent, ScrapedActivity,
+                                ScrapedActivityPhoto, ScrapedAthlete)
 
-
-__all__ = [
-    "WebClient", "ScrapingClient", "FrameType", "DataFormat", "ExportFile",
-    "ActivityFile", "ScrapedActivity", "ScrapedPhoto"
-]
 
 __log__ = logging.getLogger(__name__)
 
-BASE_URL = "https://www.strava.com"
 
 # Used for filtering when scraping the activity list
 ACTIVITY_WORKOUT_TYPES = {
@@ -33,7 +28,11 @@ ACTIVITY_WORKOUT_TYPES = {
     "Run": {None: 0, "Race": 1, "Long Run": 2, "Workout": 3}
 }
 
+# Regexes for pulling information out of the activity details page
 PHOTOS_REGEX = re.compile(r"var photosJson\s*=\s*(\[.*\]);")
+PAGE_VIEW_REGEX = re.compile(r"pageView\s*=\s*new\s+Strava.Labs.Activities.Pages.(\S+)PageView\([\"']?\d+[\"']?,\s*[\"']([^\"']+)")
+
+NON_NUMBERS = re.compile(r'[^\d\.]')
 
 ExportFile = namedtuple("ExportFile", ("filename", "content"))
 ActivityFile = ExportFile  # TODO: deprecate and remove
@@ -44,132 +43,6 @@ class ScrapingError(ValueError):
 
     This can happen because something on the website changed.
     """
-
-
-class ScrapedPhoto(BaseEntity):
-    """Represents a photo scraped from Strava's activity details page
-
-    The attributes are compatible with stravalib.models.ActivityPhoto where
-    they exist.
-    """
-
-    unique_id = Attribute(str)
-    activity_id = Attribute(int)
-    athlete_id = Attribute(int)
-    caption = Attribute(str)
-
-    location = LocationAttribute()
-
-    urls = Attribute(dict) # dimension: url
-
-    def from_dict(self, d):
-        d["unique_id"] = d.pop("photo_id")
-        d["athlete_id"] = d.pop("owner_id")
-
-        # The caption has unicode escapes (ie. \uFFFF) embedded in the string
-        d["caption"] = d.pop("caption_escaped", "").encode("utf-8").decode("unicode_escape")
-        d["urls"] = {
-            str(min(dim.values())): d.pop(name)
-            for name, dim in d.pop("dimensions").items()
-        }
-        d["location"] = [d.pop("lat"), d.pop("lng")]
-
-        return super().from_dict(d)
-
-
-class ScrapedActivity(BoundEntity):
-    """
-    Represents an Activity (ride, run, etc.) that was scraped from the website
-
-    The attributes are compatible with stravalib.model.Activity where they exist
-    """
-
-    id = Attribute(int)
-    name = Attribute(str)
-    description = Attribute(str)
-    type = Attribute(str)
-    workout_type = Attribute(str)
-
-    start_date = TimestampAttribute()
-    distance = Attribute(float)
-    moving_time = TimeIntervalAttribute()
-    elapsed_time = TimeIntervalAttribute()
-    total_elevation_gain = Attribute(float)
-    suffer_score = Attribute(int)
-    calories = Attribute(float)
-    gear_id = Attribute(str)
-
-    # True if the activity has GPS coordinates
-    # False for trainers, manual activities, etc
-    has_latlng = Attribute(bool)
-
-    trainer = Attribute(bool)
-    commute = Attribute(bool)
-    private = Attribute(bool)
-    flagged = Attribute(bool)
-
-    _photos = None
-
-    @property
-    def photos(self):
-        """Returns a list of ScrapedPhoto objects"""
-        if self._photos is None:
-            self.assert_bind_client()
-            self._photos = self.bind_client.get_activity_photos(self.id)
-        return self._photos
-
-    @property
-    def total_photo_count(self):
-        return len(self.photos)
-
-    def from_dict(self, d):
-        bike_id = d.pop("bike_id", None)
-        shoes_id = d.pop("athlete_gear_id", None)
-        if bike_id:
-            d["gear_id"] = "b{}".format(bike_id)
-        elif shoes_id:
-            d["gear_id"] = "g{}".format(shoes_id)
-
-        d["start_date"] = d.pop("start_time")
-        d["distance"] = d.pop("distance_raw")
-        d["moving_time"] = d.pop("moving_time_raw")
-        d["elapsed_time"] = d.pop("elapsed_time_raw")
-        d["total_elevation_gain"] = d.pop("elevation_gain_raw")
-
-        wt = d.pop("workout_type")
-        if d["type"] in ACTIVITY_WORKOUT_TYPES:
-            for k, v in ACTIVITY_WORKOUT_TYPES[d["type"]].items():
-                if wt == v:
-                    d["workout_type"] = k
-                    break
-
-        return super().from_dict(d)
-
-
-class DataFormat(enum.Enum):
-    ORIGINAL = "original"
-    GPX = "gpx"
-    TCX = "tcx"
-
-    def __str__(self):
-        return str(self.value)
-
-    @classmethod
-    def classify(cls, value):
-        for x in cls:
-            if x.value == str(value):
-                return x
-        raise ValueError("Invalid format '{}'".format(value))
-
-
-class FrameType(enum.Enum):
-    MOUNTAIN_BIKE = 1
-    CROSS_BIKE = 2
-    ROAD_BIKE = 3
-    TIME_TRIAL_BIKE = 4
-
-    def __str__(self):
-        return str(self.name).replace("_", " ").title()
 
 
 class ScrapingClient:
@@ -289,6 +162,55 @@ class ScrapingClient:
         if not resp.is_redirect or resp.next.url.endswith("/login"):
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
 
+    def get_extra_activity_details(self, activity_id):
+        """Scapes the full activity page for various details
+
+        Returns a dict of the properties
+        """
+        __log__.debug("Getting extra information for activity %s", activity_id)
+        resp = self.request_get("activities/{}".format(activity_id))
+        if not resp.ok:
+            raise stravalib.exc.Fault("Failed to load activity page to get details")
+
+        ret = {}
+
+        soup = BeautifulSoup(resp.text, 'html5lib')
+
+        summary = soup.find("div", class_="activity-summary-container")
+        if summary:
+            name = summary.find("h1", class_="activity-name")
+            if name:
+                ret["name"] = name.text.strip()
+            description = summary.find("div", class_="activity-description")
+            if description:
+                ret["description"] = description.text.strip()
+            device = summary.find("div", class_="device")
+            if device:
+                ret["device_name"] = device.text.strip()
+
+        for script in soup.find_all("script"):
+            if "var pageView;" in script.text:
+                m = PAGE_VIEW_REGEX.search(script.text)
+                if not m:
+                    __log__.error("Failed to extract manual and type data from page")
+                    continue
+                ret["manual"] = m.group(1).lower() == "manual"
+                ret["type"] = m.group(2)
+
+            elif "var photosJson" in script.text:
+                m = PHOTOS_REGEX.search(script.text)
+                if not m:
+                    __log__.error("Failed to extract photo data from page")
+                    continue
+                try:
+                    photos = json.loads(m.group(1))
+                except (TypeError, ValueError) as e:
+                    __log__.error("Failed to parse extracted photo data", exc_info=True)
+                    continue
+                ret["photos"] = [ScrapedActivityPhoto(**p) for p in photos]
+
+        return ret
+
     def get_activity_photos(self, activity_id, size=None, only_instagram=None):
         """A scraping-based alternative to stravalib.Client.get_activity_photos
 
@@ -296,27 +218,9 @@ class ScrapingClient:
         :param size: [unused] (for compatbility with stravalib)
         :param only_instagram: [unused] (for compatibility with stravalib)
 
-        :return: A list of ScrapedPhoto objects
+        :return: A list of ScrapedActivityPhoto objects
         """
-        resp = self._session.get("{}/activities/{}".format(BASE_URL, activity_id))
-        resp.raise_for_status()
-
-        soup = BeautifulSoup(resp.content, 'html5lib')
-        try:
-            script = next((x for x in soup.find_all("script") if "var photosJson" in x.text))
-        except StopIteration:
-            raise ScrapingError("Failed to find photo data in page")
-
-        m = PHOTOS_REGEX.search(script.text)
-        if not m:
-            raise ScrapingError("Failed to extract photo data from page")
-
-        try:
-            photos = json.loads(m.group(1))
-        except (TypeError, ValueError) as e:
-            raise ScrapingError("Failed to parse extracted photo data") from e
-
-        return [ScrapedPhoto(**p) for p in photos]
+        return self.get_extra_activity_details(activity_id).get("photos", None)
 
     def get_activities(self, keywords=None, activity_type=None, workout_type=None,
                        commute=False, is_private=False, indoor=False, gear_id=None,
@@ -415,6 +319,14 @@ class ScrapingClient:
                 # Respect the limit
                 if limit is not None and num_yielded >= limit:
                     return
+
+                # Translate workout types from ints back to strings
+                wt = activity.pop("workout_type")
+                if activity["type"] in ACTIVITY_WORKOUT_TYPES:
+                    for k, v in ACTIVITY_WORKOUT_TYPES[activity["type"]].items():
+                        if wt == v:
+                            activity["workout_type"] = k
+                            break
 
                 activity = ScrapedActivity(bind_client=self, **activity)
 
@@ -534,49 +446,57 @@ class ScrapingClient:
 
         return self._make_export_file(resp, activity_id)
 
-    @staticmethod
-    def _parse_date(date_str):
-        if not date_str:
-            return None
-        if date_str.lower() == "since beginning":
-            # Different from no date, but don't know exactly when it was
-            return datetime.utcfromtimestamp(0).date()
-        try:
-            return datetime.strptime(date_str, "%b %d, %Y").date()
-        except ValueError:
-            return None
-
-    def _get_all_bike_components(self, bike_id):
+    def get_bike_details(self, bike_id):
         """
-        Get all components for the specified bike
+        Scrape the details of the specified bike
 
         :param bike_id: The id of the bike to retreive components for
                         (must start with a "b")
         :type bike_id: str
         """
+        __log__.debug("Getting bike details for bike %s", bike_id)
         if not bike_id.startswith('b'):
             raise ValueError("Invalid bike id (must start with 'b')")
 
-        # chop off the leading "b"
-        url = "{}/bikes/{}".format(BASE_URL, bike_id[1:])
-
-        resp = self._session.get(url, allow_redirects=False)
+        resp = self.request_get(
+            "bikes/{}".format(bike_id[1:]),  # chop off the leading "b"
+            allow_redirects=False
+        )
         if resp.status_code != 200:
             raise stravalib.exc.Fault(
                 "Failed to load bike details page (status code: {})".format(resp.status_code),
             )
 
         soup = BeautifulSoup(resp.text, 'html5lib')
+
+        ret = {}
+
+        # Get data about the bike
+        gear_table = soup.find("div", class_="gear-details").find("table")
+        for k, v in zip(
+                ["frame_type", "brand_name", "model_name", "weight"],
+                [x.text for x in gear_table.find_all("td")][1::2]
+        ):
+            if not k:
+                continue
+            if k == "weight":
+                # Strip non-number chars ("kg")
+                # TODO: other units?
+                v = float(NON_NUMBERS.sub('', v))
+            ret[k.lower()] = v
+
+        # Get component data
         table = None
         for t in soup.find_all('table'):
             if t.find('thead'):
                 table = t
                 break
+        else:
+            raise ScrapingError(
+                "Bike component table not found in the HTML - layout update?"
+            )
 
-        if not table:
-            raise ScrapingError("Bike component table not found in the HTML - layout update?")
-
-        components = []
+        ret["components"] = []
         for row in table.tbody.find_all('tr'):
             cells = row.find_all('td')
             text = [cell.text.strip() for cell in cells]
@@ -591,16 +511,16 @@ class ScrapingClient:
 
             component_id = cells[6].find('a', text="Delete")['href'].rsplit("/", 1)[-1]
 
-            components.append({
-                'id': component_id,
-                'type': text[0],
-                'brand': text[1],
-                'model': text[2],
-                'added': self._parse_date(text[3]),
-                'removed': self._parse_date(text[4]),
-                'distance': distance
-            })
-        return components
+            ret["components"].append(ScrapedBikeComponent(
+                id=component_id,
+                type=text[0],
+                brand_name=text[1],
+                model_name=text[2],
+                added=text[3],
+                removed=text[4],
+                distance=distance
+            ))
+        return ret
 
     def get_bike_components(self, bike_id, on_date=None):
         """
