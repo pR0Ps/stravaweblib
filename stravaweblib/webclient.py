@@ -535,29 +535,6 @@ class ScrapingClient:
             ))
         return ret
 
-    def get_bike_components(self, bike_id, on_date=None):
-        """
-        Get components for the specified bike
-
-        :param bike_id: The id of the bike to retreive components for
-                        (must start with a "b")
-        :type bike_id: str
-
-        :param on_date: Only return components on the bike for this day. If
-                        `None`, return all components regardless of date.
-        :type on_date: None or datetime.date or datetime.datetime
-        """
-        components = self._get_all_bike_components(bike_id)
-
-        # Filter by the on_date param
-        if on_date:
-            if isinstance(on_date, datetime):
-                on_date = on_date.date()
-            return [c for c in components if \
-                    (c['added'] or date.min) <= on_date <= (c['removed'] or date.max)]
-        else:
-            return components
-
     def get_route_data(self, route_id, fmt=DataFormat.GPX):
         """
         Get a file containing the provided route's data
@@ -596,14 +573,15 @@ class WebClient(stravalib.Client):
     Requires a JWT or both of email and password
     """
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls, *_, **__):
         self = super().__new__(cls)
 
-        # Prepend __init__'s docstring with the parent classes one
-        cls.__init__.__doc__ = super().__init__.__doc__ + cls.__init__.__doc__
+        # Prepend some docstrings with the parent classes one
+        for fcn in ("__init__", "get_gear"):
+            getattr(cls, fcn).__doc__ = getattr(super(), fcn).__doc__ + getattr(cls, fcn).__doc__
 
         # Delegate certain methods and properties to the scraper instance
-        for fcn in ("delete_activity", "get_bike_components", "get_activity_data", "jwt", "csrf"):
+        for fcn in ("delete_activity", "get_activity_data", "jwt", "csrf"):
             setattr(cls, fcn, cls._delegate(ScrapingClient, fcn))
         return self
 
@@ -634,9 +612,18 @@ class WebClient(stravalib.Client):
         if self._scraper.athlete_id != self.get_athlete().id:
             raise ValueError("API and web credentials are for different accounts")
 
+    def get_gear(self, gear_id):
+        """
+        Returned Bikes will have scraped attributes lazily added
+        """
+        gear = super().get_gear(gear_id)
+        if isinstance(gear, _Bike):
+            return Bike(bind_client=self._scraper, **gear.to_dict())
+        return gear
+
     @staticmethod
-    def _delegate(cls, name):
-        func = getattr(cls, name)
+    def _delegate(clazz, name):
+        func = getattr(clazz, name)
         is_prop = isinstance(func, property)
 
         @functools.wraps(func)
