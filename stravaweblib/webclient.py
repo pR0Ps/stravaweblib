@@ -346,6 +346,19 @@ class ScrapingClient:
 
             page += 1
 
+    def get_activity(self, activity_id):
+        """A scraping-based alternative to stravalib.Client.get_activity
+
+        Note that this actually performs a search for the activity using
+        `get_activities` to get most of the information. Generally, it would be
+        more efficient to use `get_activities` to find the activities directly.
+        """
+        d = self.get_extra_activity_details(activity_id)
+        for x in self.get_activities(keywords=d["name"], activity_type=d["type"]):
+            if x.id == activity_id:
+                x._do_expand(d, overwrite=False)
+                return x
+
     def delete_activity(self, activity_id):
         """
         Deletes the specified activity.
