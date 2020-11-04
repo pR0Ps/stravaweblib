@@ -441,8 +441,9 @@ class ScrapingClient:
         :param activity_id: The activity to delete.
         :type activity_id: int
         """
-        resp = self._session.post(
-            "{}/activities/{}".format(BASE_URL, activity_id),
+        __log__.debug("Deleting activity %s", activity_id)
+        resp = self.request_post(
+            "activities/{}".format(activity_id),
             allow_redirects=False,
             data={
                 "_method": "delete",
@@ -450,7 +451,7 @@ class ScrapingClient:
             }
         )
 
-        if not resp.is_redirect or resp.next.url != "{}/athlete/training".format(BASE_URL):
+        if not resp.is_redirect or not resp.next.url.endswith("/athlete/training"):
             raise stravalib.exc.Fault(
                 "Failed to delete activity (status code: {})".format(resp.status_code),
             )
