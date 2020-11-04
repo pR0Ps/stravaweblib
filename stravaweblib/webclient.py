@@ -289,10 +289,12 @@ class ScrapingClient:
         if not resp.is_redirect or resp.next.url.endswith("/login"):
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
 
-    def get_activity_photos(self, activity_id):
+    def get_activity_photos(self, activity_id, size=None, only_instagram=None):
         """A scraping-based alternative to stravalib.Client.get_activity_photos
 
         :param activity_id: The activity for which to fetch photos.
+        :param size: [unused] (for compatbility with stravalib)
+        :param only_instagram: [unused] (for compatibility with stravalib)
 
         :return: A list of ScrapedPhoto objects
         """
