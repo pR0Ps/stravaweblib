@@ -214,6 +214,10 @@ class ScrapingClient:
             self._csrf = self._get_csrf_token()
         return self._csrf
 
+    @property
+    def athlete_id(self):
+        return int(self._session.cookies.get('strava_remember_id'))
+
     def request(self, method, service, *args, **kwargs):
         """Request a URL from Strava
 
@@ -673,6 +677,9 @@ class WebClient(stravalib.Client):
         }
         self._scraper = ScrapingClient(**sc_kwargs)
         super().__init__(*args, **kwargs)
+
+        if self._scraper.athlete_id != self.get_athlete().id:
+            raise ValueError("API and web credentials are for different accounts")
 
     @staticmethod
     def _delegate(cls, name):
