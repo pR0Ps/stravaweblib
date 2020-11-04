@@ -344,6 +344,7 @@ class ScrapingClient:
         :yield: ScrapedActivity objects
         """
 
+        __log__.debug("Getting activities")
         if activity_type is not None and activity_type not in Activity.TYPES:
             raise ValueError(
                 "Invalid activity type. Must be one of: {}".format(",".join(Activity.TYPES))
@@ -376,11 +377,11 @@ class ScrapingClient:
         conv_bool = lambda x: "" if not x else "true"
 
         while True:
-            resp = self._session.get(
-                "{}/athlete/training_activities".format(BASE_URL),
+            __log__.debug("Getting page %s of activities", page)
+            resp = self.request_get(
+                "athlete/training_activities",
                 headers= {
                     "Accept": "text/javascript, application/javascript, application/ecmascript, application/x-ecmascript",
-                    #"X-CSRF-Token": next(iter(self.csrf.values())),
                     "X-Requested-With": "XMLHttpRequest",
                 },
                 params={
@@ -394,6 +395,7 @@ class ScrapingClient:
                     "private_activities": conv_bool(is_private),
                     "trainer": conv_bool(indoor),
                     "gear": gear_id or "",
+                    "order": "start_date_local DESC" # Return in reverse-chronological order
                 }
             )
             if resp.status_code != 200:
@@ -403,9 +405,11 @@ class ScrapingClient:
             try:
                 data = resp.json()["models"]
             except (ValueError, TypeError, KeyError) as e:
-                raise ScrapingError(
-                    "Invalid JSON response from Strava"
-                ) from e
+                raise ScrapingError("Invalid JSON response from Strava") from e
+
+            # No results = done
+            if not data:
+                return
 
             for activity in data:
                 # Respect the limit
@@ -415,13 +419,20 @@ class ScrapingClient:
                 activity = ScrapedActivity(bind_client=self, **activity)
 
                 # Respect the before and after filters
-                if after < activity.start_date.timestamp() < before:
-                    yield activity
-                    num_yielded += 1
+                # Will see activities from neweset to oldest so can do less
+                # work to limit by time
+                ts = activity.start_date.timestamp()
+                if ts < after:
+                    # Activity is too new, no more results
+                    return
+                elif ts > before:
+                    # Activity is too old, don't yield it
+                    continue
 
-            # No results = done
-            if not data:
-                return
+                yield activity
+                num_yielded += 1
+
+            page += 1
 
     def delete_activity(self, activity_id):
         """
