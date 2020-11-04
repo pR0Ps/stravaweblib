@@ -563,6 +563,50 @@ class ScrapingClient:
 
         return self._make_export_file(resp, route_id)
 
+    def get_all_bikes(self):
+        """Scrape all bike information from Strava
+
+        :yield: `ScrapedBike` objects
+        """
+        __log__.debug("Getting all bike data")
+        resp = self.request_get("athletes/{}/gear/bikes".format(self.athlete_id))
+        if not resp.ok:
+            raise stravalib.exc.Fault("Failed to get list of bikes")
+        try:
+            yield from (
+                ScrapedBike(
+                    bind_client=self,
+                    id="b{}".format(b.pop("id")),  # add "b" to gear id
+                    **b
+                )
+                for b in resp.json()
+            )
+        except (TypeError, ValueError) as e:
+            raise ScrapingError("Failed to parse bike data") from e
+
+    def get_all_shoes(self):
+        """Scrape all shoe information from Strava
+
+        :yield: `ScrapedShoe` objects
+        """
+        __log__.debug("Getting all shoe data")
+        resp = self.request_get("athletes/{}/gear/shoes".format(self.athlete_id))
+        if not resp.ok:
+            raise stravalib.exc.Fault("Failed to get list of shoes")
+        try:
+            yield from (ScrapedShoe(**s) for s in resp.json())
+        except (TypeError, ValueError) as e:
+            raise ScrapingError("Failed to parse shoe data") from e
+
+    def get_gear(self, gear_id):
+        """A scraping-based replacement for `stravalib.Client.get_gear`"""
+        try:
+            if gear_id.startswith("b"):
+                return next(x for x in self.get_all_bikes() if x.id == gear_id)
+            else:
+                return next(x for x in self.get_all_shoes() if x.id == gear_id)
+        except StopIteration:
+            raise KeyError("No gear with id '{}' found".format(gear_id))
 
 
 class WebClient(stravalib.Client):
