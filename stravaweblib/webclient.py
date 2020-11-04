@@ -5,6 +5,7 @@ from datetime import date, datetime
 import enum
 import functools
 import json
+import logging
 import re
 import time
 import uuid
@@ -22,6 +23,7 @@ __all__ = [
     "ActivityFile", "ScrapedActivity", "ScrapedPhoto"
 ]
 
+__log__ = logging.getLogger(__name__)
 
 BASE_URL = "https://www.strava.com"
 
@@ -193,8 +195,10 @@ class ScrapingClient:
 
         if jwt:
             self._login_with_jwt(jwt)
+            __log__.info("Resumed session using JWT '%s'", jwt)
         elif email and password:
             self._login_with_password(email, password)
+            __log__.info("Logged in as '%s'", email)
         else:
             raise ValueError("'jwt' or both of 'email' and 'password' are required")
 
@@ -210,14 +214,29 @@ class ScrapingClient:
             self._csrf = self._get_csrf_token()
         return self._csrf
 
+    def request(self, method, service, *args, **kwargs):
+        """Request a URL from Strava
+
+        :service: The URL to send the request to without the base URL
+        """
+        return self._session.request(method, "https://www.strava.com/{}".format(service), *args, **kwargs)
+
+    def request_head(self, service, *args, **kwargs):
+        return self.request("HEAD", service, *args, **kwargs)
+
+    def request_get(self, service, *args, **kwargs):
+        return self.request("GET", service, *args, **kwargs)
+
+    def request_post(self, service, *args, **kwargs):
+        return self.request("POST", service, *args, **kwargs)
+
     def _get_csrf_token(self):
         """Get a CSRF token
 
         Uses the about page because it's small and doesn't redirect based
         on if the client is logged in or not.
         """
-        login_html = self._session.get("{}/about".format(BASE_URL)).text
-        soup = BeautifulSoup(login_html, 'html.parser')
+        soup = BeautifulSoup(self.request_get("about").text, 'html5lib')
 
         try:
             head = soup.head
@@ -253,8 +272,8 @@ class ScrapingClient:
 
     def _login_with_password(self, email, password):
         """Log into the website using a username and password"""
-        resp = self._session.post(
-            "{}/session".format(BASE_URL),
+        resp = self.request_post(
+            "session",
             allow_redirects=False,
             data={
                 "email": email,
@@ -263,7 +282,7 @@ class ScrapingClient:
                 **self.csrf
             }
         )
-        if not resp.is_redirect or resp.next.url == "{}/login".format(BASE_URL):
+        if not resp.is_redirect or resp.next.url.endswith("/login"):
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
 
     def get_activity_photos(self, activity_id):
