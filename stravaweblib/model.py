@@ -6,7 +6,7 @@ from datetime import date, datetime
 from stravalib.attributes import (Attribute, DateAttribute, TimestampAttribute,
                                   TimeIntervalAttribute, LocationAttribute)
 from stravalib.model import (BaseEntity, BoundEntity, LoadableEntity,
-                             Bike as _Bike)
+                             EntityCollection, Bike as _Bike)
 from stravalib import unithelper as uh
 
 
@@ -177,7 +177,7 @@ class ScrapedBikeComponent(BaseEntity):
 class _BikeData(ExpandableEntity):
     """Mixin class to add weight and components to a Bike"""
     frame_type = Attribute(FrameType)
-    components = Attribute(list)
+    components = Attribute(EntityCollection(ScrapedBikeComponent))
     weight = Attribute(float, units=uh.kg)
 
     _expandable = {"weight", "components"}
@@ -295,7 +295,7 @@ class ScrapedActivity(ExpandableEntity):
     flagged = Attribute(bool)
 
     manual = Attribute(bool)
-    photos = Attribute(list) # list of ScrapedActivityPhoto objects
+    photos = Attribute(EntityCollection(ScrapedActivityPhoto))
     device_name = Attribute(str)
 
     _expandable = {"photos", "manual", "device_name"}
