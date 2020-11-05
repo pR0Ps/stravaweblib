@@ -73,42 +73,71 @@ class FrameType(enum.Enum):
         return cls[s.replace(" ", "_").upper().replace("TT_", "TIME_TRIAL_")]
 
 
-class ExpandableEntity(LoadableEntity):
-    """Allows for an object to be "expanded" on demand"""
+class MetaLazy(type):
+    """A metaclass that returns subclasses of the class of the passed in Attribute
 
-    _expanded = False
-    _expandable = set()
+    This is used with the LazyLoaded class wrapper below to dynamically create
+    lazy-loaded subclasses.
 
-    def __getattribute__(self, k):
-        if k != "_expandable" and k in self._expandable and not self._expanded:
-            self.expand()
-        return super().__getattribute__(k)
+    Also, it names the returned types LazyLoaded<classname>
+    """
+    def __call__(cls, attr, *args, **kwargs):
+        attr_cls = attr.__class__
+        cls = cls.__class__(cls.__name__ + attr_cls.__name__, (cls, attr_cls), {})
+        return super(MetaLazy, cls).__call__(attr, *args, **kwargs)
 
-    def _do_expand(self, d, overwrite=True):
-        if self._expanded:
-            return
 
-        if overwrite:
-            self.from_dict(d)
-            self._expanded = True
-            return
+class LazyLoaded(metaclass=MetaLazy):
+    """Class wrapper that handles lazy-loading an Attribute as it is requested"""
 
-        # Only set non-null attributes
-        # Mark as expanded before doing the expansion so __getatttribute__
-        # doesn't cause infinte recursion
-        try:
-            self._expanded = True
-            self.from_dict({
-                k: v for k, v in d.items()
-                if not getattr(self, k, None)
-            })
-        except Exception:
-            self._expanded = False
-            raise
+    def __init__(self, attr, fcn=None, key=None):
+        """Set up the LazyLoaded wrapper
 
-    def expand(self):
-        # Needs to call self._do_expand with some data
-        raise NotImplementedError()
+        Can expand attributes individually using a lambda function (fcn), or
+        multiple attributes at a time via an `expand` function defined on the
+        class that houses it (key).
+
+        Using `fcn`-based attributes is recommended when each attribute needs
+        to be retrieved separately. Using `key`-based attributes is recommended
+        when multiple attributes can be retrieved at the same time.
+
+        :param attr: The `Attribute` to wrap (ie. `Attribute(int)`)
+        :param fcn: This function will be called the first time the attribute
+                    is requested. The result will be set as the attribute value.
+        :param key: The key of the attribute in the lazyload cache. The lazyload
+                    cache is stored on the parent class. When this attribute is
+                    requested and the key in not in the cache, the `load_attribute`
+                    function on the parent class is called and the result is
+                    added to the cache. At this point, the key is poped out of
+                    the cache and set as the attribute variable.
+        """
+        if not (bool(fcn) ^ bool(key)):
+            raise ValueError("One of fcn or key (not both) is required")
+        self._fcn = fcn
+        self._key = key
+        # Mimic the child Attribute's properties
+        super().__init__(
+            type_=attr.type,
+            resource_states=attr.resource_states,
+            units=attr.units
+        )
+
+    def __get__(self, obj, clazz):
+        if obj is not None and obj not in self.data:
+            if self._fcn:
+                # Call the provided function to load the attribute
+                value = self._fcn(obj)
+            elif self._key:
+                if not hasattr(obj, "_lazyload_cache"):
+                    obj._lazyload_cache = {}
+
+                # Use obj.load_attribute() to ensure the object is in the cache
+                if self._key not in obj._lazyload_cache:
+                    obj._lazyload_cache.update(obj.load_attribute(self._key))
+                value = obj._lazyload_cache.pop(self._key)
+
+            self.__set__(obj, value)
+        return super().__get__(obj, clazz)
 
 
 class ScrapedGear(BaseEntity):
@@ -174,18 +203,20 @@ class ScrapedBikeComponent(BaseEntity):
         )
 
 
-class _BikeData(ExpandableEntity):
+class _BikeData(LoadableEntity):
     """Mixin class to add weight and components to a Bike"""
-    frame_type = Attribute(FrameType)
-    components = Attribute(EntityCollection(ScrapedBikeComponent))
-    weight = Attribute(float, units=uh.kg)
+    frame_type = LazyLoaded(Attribute(FrameType), key="frame_type")
+    components = LazyLoaded(EntityCollection(ScrapedBikeComponent), key="components")
+    weight = LazyLoaded(Attribute(float, units=uh.kg), key="weight")
 
-    _expandable = {"weight", "components"}
-
-    def expand(self):
+    def load_attribute(self, _):
         """Expand the bike with more details using scraping"""
         self.assert_bind_client()
-        self._do_expand(self.bind_client.get_bike_details(self.id))
+
+        d = self.bind_client.get_bike_details(self.id)
+        # Upgrade the frame_type to the enum
+        _dict_modify(d, "frame_type", "frame_type", fcn=lambda x: FrameType.from_str(x))
+        return d
 
     def components_on_date(self, on_date):
         """Get bike components installed on the specified date
@@ -204,11 +235,6 @@ class _BikeData(ExpandableEntity):
             if (c.added or date.min) <= on_date <= (c.removed or date.max)
         ]
 
-    def from_dict(self, d):
-        # Upgrade the frame_type to the enum
-        _dict_modify(d, "frame_type", "frame_type", fcn=lambda x: FrameType(x))
-        return super().from_dict(d)
-
 
 class Bike(_BikeData, _Bike) :
     __doc__ = _Bike.__doc__ + """
@@ -221,13 +247,6 @@ class ScrapedBike(ScrapedGear, _BikeData):
 
     The attributes are compatible with stravalib.models.Bike where they exist.
     """
-
-    _expandable = {'frame_type', 'brand_name', 'model_name'}
-
-    def from_dict(self, d):
-        # Upgrade the scraped frame_type string to the enum
-        _dict_modify(d, "frame_type", "frame_type", fcn=lambda x: FrameType.from_str(x))
-        return super().from_dict(d)
 
 
 class ScrapedActivityPhoto(BaseEntity):
@@ -264,7 +283,7 @@ class ScrapedActivityPhoto(BaseEntity):
         return super().from_dict(d)
 
 
-class ScrapedActivity(ExpandableEntity):
+class ScrapedActivity(LoadableEntity):
     """
     Represents an Activity (ride, run, etc.) that was scraped from the website
 
@@ -294,16 +313,13 @@ class ScrapedActivity(ExpandableEntity):
     private = Attribute(bool)
     flagged = Attribute(bool)
 
-    manual = Attribute(bool)
-    photos = Attribute(EntityCollection(ScrapedActivityPhoto))
-    device_name = Attribute(str)
+    manual = LazyLoaded(Attribute(bool), key="manual")
+    photos = LazyLoaded(EntityCollection(ScrapedActivityPhoto), key="photos")
+    device_name = LazyLoaded(Attribute(str), key="device_name")
 
-    _expandable = {"photos", "manual", "device_name"}
-
-    def expand(self):
-        """Expand the activity with more details using scraping"""
+    def load_attribute(self, _):
         self.assert_bind_client()
-        self._do_expand(self.bind_client.get_extra_activity_details(self.id), overwrite=False)
+        return self.bind_client.get_extra_activity_details(self.id)
 
     @property
     def total_photo_count(self):
