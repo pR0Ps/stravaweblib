@@ -90,7 +90,7 @@ class MetaLazy(type):
 class LazyLoaded(metaclass=MetaLazy):
     """Class wrapper that handles lazy-loading an Attribute as it is requested"""
 
-    def __init__(self, attr, fcn=None, key=None):
+    def __init__(self, attr, *, fcn=None, key=None, property=False):
         """Set up the LazyLoaded wrapper
 
         Can expand attributes individually using a lambda function (fcn), or
@@ -101,6 +101,9 @@ class LazyLoaded(metaclass=MetaLazy):
         to be retrieved separately. Using `key`-based attributes is recommended
         when multiple attributes can be retrieved at the same time.
 
+        If `property` is True, the attribute will be loaded each time it is
+        requested. This makes the attribute act more like a property.
+
         :param attr: The `Attribute` to wrap (ie. `Attribute(int)`)
         :param fcn: This function will be called the first time the attribute
                     is requested. The result will be set as the attribute value.
@@ -108,11 +111,14 @@ class LazyLoaded(metaclass=MetaLazy):
                     cache is stored on the parent class. When this attribute is
                     requested and the key in not in the cache, the `load_attribute`
                     function on the parent class is called and the result is
-                    added to the cache. At this point, the key is poped out of
-                    the cache and set as the attribute variable.
+                    added to the cache. At this point, the key is popped out of
+                    the cache and set as the attribute variable. If the key is
+                    not in the cache, `None` is set at the value of the attribute.
+        :param property: Don't store the result of the lazy load
         """
         if not (bool(fcn) ^ bool(key)):
             raise ValueError("One of fcn or key (not both) is required")
+        self._property = property
         self._fcn = fcn
         self._key = key
         # Mimic the child Attribute's properties
@@ -123,7 +129,7 @@ class LazyLoaded(metaclass=MetaLazy):
         )
 
     def __get__(self, obj, clazz):
-        if obj is not None and obj not in self.data:
+        if obj is not None and (self._property or obj not in self.data):
             if self._fcn:
                 # Call the provided function to load the attribute
                 value = self._fcn(obj)
@@ -133,11 +139,21 @@ class LazyLoaded(metaclass=MetaLazy):
 
                 # Use obj.load_attribute() to ensure the object is in the cache
                 if self._key not in obj._lazyload_cache:
-                    obj._lazyload_cache.update(obj.load_attribute(self._key))
-                value = obj._lazyload_cache.pop(self._key)
+                    obj._lazyload_cache.update(obj.load_attribute(self._key) or {})
+                value = obj._lazyload_cache.pop(self._key, None)
+
+            if self._property:
+                return value
 
             self.__set__(obj, value)
         return super().__get__(obj, clazz)
+
+    def __set__(self, obj, val):
+        if self._property:
+            raise AttributeError(
+                "Can't set {} property on {!r}".format(self.__class__.__name__, obj)
+            )
+        super().__set__(obj, val)
 
 
 class ScrapedGear(BaseEntity):
