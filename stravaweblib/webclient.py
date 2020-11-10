@@ -3,20 +3,81 @@ from collections import namedtuple
 from datetime import date, datetime
 import functools
 import enum
-import re
+import uuid
 
+from bs4 import BeautifulSoup
 import requests
 import stravalib
-from bs4 import BeautifulSoup
+from stravalib.attributes import Attribute, TimestampAttribute, TimeIntervalAttribute
+from stravalib.model import Activity, BaseEntity
 
 
-__all__ = ["WebClient", "FrameType", "DataFormat", "ActivityFile"]
+__all__ = ["WebClient", "ScrapingClient", "FrameType", "DataFormat", "ActivityFile", "ScrapedActivity"]
 
 
 BASE_URL = "https://www.strava.com"
 
+# Used for filtering when scraping the activity list
+ACTIVITY_WORKOUT_TYPES = {
+    "Ride": {None: 10, "Race": 11, "Workout": 12},
+    "Run": {None: 0, "Race": 1, "Long Run": 2, "Workout": 3}
+}
 
 ActivityFile = namedtuple("ActivityFile", ("filename", "content"))
+
+
+class ScrapedActivity(BaseEntity):
+    """
+    Represents an Activity (ride, run, etc.) that was scraped from the website
+
+    The attributes are compatible with stravalib.model.Activity where possible
+    (some are missing)
+    """
+
+    id = Attribute(int)
+    name = Attribute(str)
+    description = Attribute(str)
+    type = Attribute(str)
+    workout_type = Attribute(str)
+
+    start_date = TimestampAttribute()
+    distance = Attribute(float)
+    moving_time = TimeIntervalAttribute()
+    elapsed_time = TimeIntervalAttribute()
+    total_elevation_gain = Attribute(float)
+    suffer_score = Attribute(int)
+    calories = Attribute(float)
+    gear_id = Attribute(str)
+
+    has_latlng = Attribute(bool)
+
+    trainer = Attribute(bool)
+    commute = Attribute(bool)
+    private = Attribute(bool)
+    flagged = Attribute(bool)
+
+    def from_dict(self, d):
+        bike_id = d.get("bike_id")
+        shoes_id = d.get("athlete_gear_id")
+        if bike_id:
+            d["gear_id"] = "b{}".format(bike_id)
+        elif shoes_id:
+            d["gear_id"] = "g{}".format(shoes_id)
+
+        d["start_date"] = d.pop("start_time")
+        d["distance"] = d.pop("distance_raw")
+        d["moving_time"] = d.pop("moving_time_raw")
+        d["elapsed_time"] = d.pop("elapsed_time_raw")
+        d["total_elevation_gain"] = d.pop("elevation_gain_raw")
+
+        wt = d.pop("workout_type")
+        if d["type"] in ACTIVITY_WORKOUT_TYPES:
+            for k, v in ACTIVITY_WORKOUT_TYPES[d["type"]].items():
+                if wt == v:
+                    d["workout_type"] = k
+                    break
+
+        return super().from_dict(d)
 
 
 class DataFormat(enum.Enum):
@@ -45,29 +106,24 @@ class FrameType(enum.Enum):
         return str(self.name).replace("_", " ").title()
 
 
-class WebClient(stravalib.Client):
+class ScrapingClient:
     """
-    An extension to the stravalib Client that fills in some of the gaps in
-    the official API using web scraping.
+    A client that uses web scraping to interface with Strava.
+
+    Can be used as a mixin to add the extra methods to the main stravalib.Client
     """
 
-    def __init__(self, *args, **kwargs):
-        # Docstring set manually after class definition
-
-        email = kwargs.pop("email", None)
-        password = kwargs.pop("password", None)
+    def __init__(self, *args, email, password, **kwargs):
         if not email or not password:
             raise ValueError("'email' and 'password' kwargs are required")
 
         self._csrf = {}
-        self._component_data = {}
         self._session = requests.Session()
         self._session.headers.update({
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         })
         self._login(email, password)
 
-        # Init the normal stravalib client with remaining args
         super().__init__(*args, **kwargs)
 
     def _login(self, email, password):
@@ -84,10 +140,10 @@ class WebClient(stravalib.Client):
             head = soup.head
             csrf_param = head.find('meta', attrs={"name": "csrf-param"}).attrs['content']
             csrf_token = head.find('meta', attrs={"name": "csrf-token"}).attrs['content']
-        except (AttributeError, KeyError):
+        except (AttributeError, KeyError) as e:
             # "AttributeError: 'NoneType' object has no attr..." when failing
             # to find the tags.
-            raise stravalib.exc.LoginFailed("Couldn't find CSRF token")
+            raise stravalib.exc.LoginFailed("Couldn't find CSRF token") from e
 
         # Save csrf token to use throughout the session
         self._csrf = {csrf_param: csrf_token}
@@ -100,6 +156,89 @@ class WebClient(stravalib.Client):
         resp = self._session.post(session_url, allow_redirects=False, data=post_info)
         if not resp.is_redirect or resp.next.url == login_url:
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
+
+    def scrape_activites(self, keywords=None, activity_type=None, workout_type=None,
+                         commute=False, is_private=False, indoor=False, gear_id=None):
+        """A scraping-based alternative to stravalib.Client.get_activities()
+
+        Note that when using multiple parameters they are treated as AND, not OR
+
+        :param keywords: Text to search for
+        :param activity_type: The type of the activity. See stravalib.model:Activity.TYPES
+        :param workout_type: The type of workout ("Race", "Workout", etc)
+        :param commute: Only return activities marked as commutes
+        :param is_private: Only return private activities
+        :param indoor: Only return indoor/trainer activities
+        :param gear_id: Only return activities using this gear
+
+        :yield: ScrapedActivity objects
+        """
+
+        if activity_type is not None and activity_type not in Activity.TYPES:
+            raise ValueError(
+                "Invalid activity type. Must be one of: {}".format(",".join(Activity.TYPES))
+            )
+
+        if activity_type in ACTIVITY_WORKOUT_TYPES:
+            workout_type = ACTIVITY_WORKOUT_TYPES[activity_type].get(workout_type)
+            if workout_type is None:
+                raise ValueError(
+                    "Invalid workout type for a {}. Must be one of: {}".format(
+                        activity_type,
+                        ", ".join(ACTIVITY_WORKOUT_TYPES[activity_type].keys())
+                    )
+                )
+        elif workout_type is not None or gear_id is not None:
+            raise ValueError(
+                "Can only filter using workout type of gear when activity type is one of: {}".format(
+                    ", ".join(ACTIVITY_WORKOUT_TYPES.keys())
+                )
+            )
+
+        page = 1
+        per_page = 20
+        search_session_id = uuid.uuid4()
+
+        conv_bool = lambda x: "" if not x else "true"
+
+        while True:
+            resp = self._session.get(
+                "{}/athlete/training_activities".format(BASE_URL),
+                headers= {
+                    "Accept": "text/javascript, application/javascript, application/ecmascript, application/x-ecmascript",
+                    #"X-CSRF-Token": next(iter(self._csrf.values())),
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                params={
+                    "search_session_id": search_session_id,
+                    "page": page,
+                    "per_page": per_page,
+                    "keywords": keywords,
+                    "new_activity_only": "false",
+                    "activity_type": activity_type or "",
+                    "commute": conv_bool(commute),
+                    "private_activities": conv_bool(is_private),
+                    "trainer": conv_bool(indoor),
+                    "gear": gear_id or "",
+                }
+            )
+            if resp.status_code != 200:
+                raise stravalib.exc.Fault(
+                    "Failed to list activities (status code {})".format(resp.status_code)
+                )
+            try:
+                data = resp.json()["models"]
+            except (ValueError, TypeError, KeyError) as e:
+                raise stravalib.exc.Fault(
+                    "Invalid JSON response from Strava"
+                ) from e
+
+            for activity in data:
+                yield ScrapedActivity(**activity)
+
+            # No results = stop requesting pages
+            if not data:
+                break
 
     def delete_activity(self, activity_id):
         """
@@ -117,8 +256,7 @@ class WebClient(stravalib.Client):
                 "Failed to delete activity (status code: {})".format(resp.status_code),
             )
 
-    def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL,
-                          json_fmt=None):
+    def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL, json_fmt=None):
         """
         Get a file containing the provided activity's data
 
@@ -182,7 +320,8 @@ class WebClient(stravalib.Client):
         return ActivityFile(filename=filename,
                             content=resp.iter_content(chunk_size=16384))
 
-    def _parse_date(self, date_str):
+    @staticmethod
+    def _parse_date(date_str):
         if not date_str:
             return None
         if date_str.lower() == "since beginning":
@@ -190,7 +329,7 @@ class WebClient(stravalib.Client):
             return datetime.utcfromtimestamp(0).date()
         try:
             return datetime.strptime(date_str, "%b %d, %Y").date()
-        except ValueError as e:
+        except ValueError:
             return None
 
     @functools.lru_cache()
@@ -215,10 +354,13 @@ class WebClient(stravalib.Client):
             )
 
         soup = BeautifulSoup(resp.text, 'html5lib')
-        for table in soup.find_all('table'):
-            if table.find('thead'):
+        table = None
+        for t in soup.find_all('table'):
+            if t.find('thead'):
+                table = t
                 break
-        else:
+
+        if not table:
             raise ValueError("Bike component table not found in the HTML - layout update?")
 
         components = []
@@ -269,6 +411,17 @@ class WebClient(stravalib.Client):
                     (c['added'] or date.min) <= on_date <= (c['removed'] or date.max)]
         else:
             return components
+
+
+# Mix in the ScrapingClient to inherit all its methods
+class WebClient(ScrapingClient, stravalib.Client):
+    """
+    An extension to the stravalib Client that fills in some of the gaps in
+    the official API using web scraping.
+
+    Requires a username and password
+    """
+
 
 # Inherit parent documentation for WebClient.__init__
 WebClient.__init__.__doc__ = stravalib.Client.__init__.__doc__ + \
