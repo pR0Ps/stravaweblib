@@ -21,6 +21,10 @@ def _parse_component_date(date_str):
     except ValueError:
         return None
 
+def _decode_unicode_escapes(s):
+    """Decodes unicode escapes (\xFFFF) enbeddded in a string"""
+    return s.encode("utf-8").decode("unicode_escape")
+
 
 def _dict_modify(d, prev, target, overwrite=True, default=None, fcn=None):
     """Translate the prev key to target
@@ -247,7 +251,7 @@ class ScrapedActivityPhoto(BaseEntity):
         _dict_modify(d, "owner_id", "athlete_id")
 
         # The caption has unicode escapes (ie. \uFFFF) embedded in the string
-        _dict_modify(d, "caption_escaped", "caption", fcn=lambda x: x.encode("utf-8").decode("unicode_escape"))
+        _dict_modify(d, "caption_escaped", "caption", fcn=_decode_unicode_escapes)
 
         if "dimensions" in d:
             d["urls"] = {
