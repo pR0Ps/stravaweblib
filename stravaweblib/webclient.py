@@ -29,7 +29,9 @@ ACTIVITY_WORKOUT_TYPES = {
 }
 
 # Regexes for pulling information out of the activity details page
-PHOTOS_REGEX = re.compile(r"var photosJson\s*=\s*(\[.*\]);")
+PHOTOS_REGEX = re.compile(r"var\s+photosJson\s*=\s*(\[.*\]);")
+ATHLETE_REGEX = re.compile(r"var\s+currentAthlete\s*=\s*new\s+Strava.Models.CurrentAthlete\(({.*})\);")
+CHALLENGE_IDS_REGEX = re.compile(r"var\s+trophiesAnalyticsProperties\s*=\s*{.*challenge_id:\s*\[(\[[\d\s,]*\])\]")
 PAGE_VIEW_REGEX = re.compile(r"pageView\s*=\s*new\s+Strava.Labs.Activities.Pages.(\S+)PageView\([\"']?\d+[\"']?,\s*[\"']([^\"']+)")
 
 NON_NUMBERS = re.compile(r'[^\d\.]')
@@ -563,11 +565,16 @@ class ScrapingClient:
 
         return self._make_export_file(resp, route_id)
 
-    def get_all_bikes(self):
+    def get_all_bikes(self, athlete_id=None):
         """Scrape all bike information from Strava
 
         :yield: `ScrapedBike` objects
         """
+        # Return minimal information from the athlete page if this isn't the
+        # currently-logged in athlete.
+        if int(athlete_id) != self.athlete_id:
+            return self.get_athlete(athlete_id).bikes
+
         __log__.debug("Getting all bike data")
         resp = self.request_get("athletes/{}/gear/bikes".format(self.athlete_id))
         if not resp.ok:
@@ -584,11 +591,16 @@ class ScrapingClient:
         except (TypeError, ValueError) as e:
             raise ScrapingError("Failed to parse bike data") from e
 
-    def get_all_shoes(self):
+    def get_all_shoes(self, athlete_id=None):
         """Scrape all shoe information from Strava
 
         :yield: `ScrapedShoe` objects
         """
+        # Return minimal information from the athlete page if this isn't the
+        # currently-logged in athlete.
+        if int(athlete_id) != self.athlete_id:
+            return self.get_athlete(athlete_id).shoes
+
         __log__.debug("Getting all shoe data")
         resp = self.request_get("athletes/{}/gear/shoes".format(self.athlete_id))
         if not resp.ok:
@@ -607,6 +619,113 @@ class ScrapingClient:
                 return next(x for x in self.get_all_shoes() if x.id == gear_id)
         except StopIteration:
             raise KeyError("No gear with id '{}' found".format(gear_id))
+
+    def get_athlete(self, athlete_id=None):
+        """A scraping-based replacement for `stravalib.Client.get_athlete`"""
+        if athlete_id is None:
+            athlete_id = self.athlete_id
+
+        athlete_id = int(athlete_id)
+
+        __log__.debug("Getting athlete %s", athlete_id)
+        resp = self.request_get("athletes/{}".format(athlete_id))
+        if not resp.ok:
+            raise stravalib.exc.Fault("Failed to get athlete {}".format(athlete_id))
+
+        ret = {}
+        soup = BeautifulSoup(resp.text, 'html5lib')
+
+        for script in soup.find_all("script"):
+            # This method only works on the currently-logged in athlete but
+            # returns much more data.
+            if athlete_id == self.athlete_id and "Strava.Models.CurrentAthlete" in script.text:
+                m = ATHLETE_REGEX.search(script.text)
+                if not m:
+                    __log__.error("Failed to extract detailed athlete data")
+                    continue
+                try:
+                    ret.update(json.loads(m.group(1)))
+                except (TypeError, ValueError) as e:
+                    __log__.error("Failed to parse extracted athlete data", exc_info=True)
+                    continue
+
+            elif "var trophiesAnalyticsProperties" in script.text:
+                m = CHALLENGE_IDS_REGEX.search(script.text)
+                if not m:
+                    __log__.error("Failed to extract completed challenges")
+                    continue
+                try:
+                    ret["challenges"] = json.loads(m.group(1))
+                except (TypeError, ValueError) as e:
+                    __log__.error("Failed to parse extracted challenge data", exc_info=True)
+                    continue
+
+            elif "var photosJson" in script.text:
+                # Exact same as activity pages
+                m = PHOTOS_REGEX.search(script.text)
+                if not m:
+                    __log__.error("Failed to extract photo data from page")
+                    break
+                try:
+                    photos = json.loads(m.group(1))
+                except (TypeError, ValueError) as e:
+                    __log__.error("Failed to parse extracted photo data", exc_info=True)
+                    break
+                ret["photos"] = [ScrapedActivityPhoto(**p) for p in photos]
+
+        # Failed the detailed scrape or not getting the currently-logged in athlete
+        # (this method works for all athletes)
+        if "id" not in ret:
+            ret["id"] = athlete_id
+            # There are multiple headings depending on the level of access
+            for heading in soup.find_all("div", class_="profile-heading"):
+                name = heading.find("h1", class_="athlete-name")
+                if name:
+                    ret["name"] = name.text.strip()
+
+                location = heading.find("div", class_="location")
+                if location:
+                    ret["city"], ret["state"], ret["country"] = [x.strip() for x in location.text.split(",")]
+
+                profile = heading.find("img", class_="avatar-img")
+                if profile:
+                    ret["profile"] = profile["src"]
+
+        # Scrape basic gear info from the sidebar if not getting the logged
+        # in athlete.
+        # By providing minimal data for non-logged-in athletes, no more data
+        # will be lazy-loaded by the bikes and shoes attributes. This is what
+        # we want since the lazy-load would just call this function again.
+        # However, when getting the logged in athlete's gear, we don't want to
+        # set anything since the lazy-load will use the more detailed
+        # get_all_bikes/gear functions instead of this one.
+        if athlete_id != self.athlete_id:
+            ret["bikes"] = []
+            ret["shoes"] = []
+            for gear in soup.select("div.section.stats.gear"):
+                if "bikes" in gear["class"]:
+                    type_ = "bikes"
+                    cls = ScrapedBike
+                elif "shoes" in gear["class"]:
+                    type_ = "shoes"
+                    cls = ScrapedShoe
+                else:
+                    continue
+
+                for row in gear.find("table").find_all("tr"):
+                    name, dist = row.find_all("td")
+                    link=name.find("a")
+                    gear_id = None
+                    if link and type_ == "bikes":
+                        gear_id = "b{}".format(link["href"].rsplit("/", 1)[-1])
+
+                    ret[type_].append(cls(
+                        id=gear_id,
+                        name=name.text.strip(),
+                        distance=int(float(NON_NUMBERS.sub('', dist.text.strip())) * 1000),
+                    ))
+
+        return ScrapedAthlete(bind_client=self, **ret)
 
 
 class WebClient(stravalib.Client):

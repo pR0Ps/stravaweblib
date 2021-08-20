@@ -353,3 +353,63 @@ class ScrapedActivity(LoadableEntity):
         _dict_modify(d, "elevation_gain_raw", "elevation_gain")
 
         return super().from_dict(d)
+
+
+class ScrapedAthlete(LoadableEntity):
+    """
+    Represents Athlete data scraped from the website
+
+    The attributes are compatible with stravalib.model.Athlete where they exist
+    """
+    firstname = Attribute(str)
+    lastname = Attribute(str)
+    # Dynamically compute the display name in the same way Strava does
+    name = LazyLoaded(
+        Attribute(str),
+        fcn=lambda x: "{} {}".format(x.firstname or "", x.lastname or "").strip(),
+        property=True
+    )
+
+    profile = Attribute(str)
+    photos = EntityCollection(ScrapedActivityPhoto)
+    challenges = Attribute(list)
+
+    city = Attribute(str)
+    state = Attribute(str)
+    country = Attribute(str)
+    location = LocationAttribute()
+
+    bikes = LazyLoaded(EntityCollection(ScrapedBike), key="bikes")
+    shoes = LazyLoaded(EntityCollection(ScrapedShoe), key="shoes")
+
+    def load_attribute(self, key):
+        self.assert_bind_client()
+        if key == "bikes":
+            v = self.bind_client.get_all_bikes(self.id)
+        elif key == "shoes":
+            v = self.bind_client.get_all_shoes(self.id)
+        else:
+            return
+        return {key: v}
+
+    def from_dict(self, d):
+        # Merge geo subdict into the main dict
+        d.update(d.pop("geo", {}))
+
+        _dict_modify(d, "photo", "profile_medium")
+        _dict_modify(d, "photo_large", "profile")
+        _dict_modify(d, "first_name", "firstname")
+        _dict_modify(d, "last_name", "lastname")
+        _dict_modify(d, "gender", "sex")
+        _dict_modify(d, "lat_lng", "location")
+
+        # According to some code returned in the HTML, Strava computes the
+        # display name using "<first> <last>". He we make an attempt to break
+        # the display name back up into it's parts. This is only for
+        # compatibility with the stravalib API - you should always use obj.name
+        name = d.pop("name", None)
+        if name and "firstname" not in d and "lastname" not in d:
+            # total guess: assume more last names have spaces than first
+            d["firstname"], d["lastname"] = name.split(" ", 1)
+
+        return super().from_dict(d)
