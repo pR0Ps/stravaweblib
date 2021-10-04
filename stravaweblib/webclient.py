@@ -69,6 +69,17 @@ class WebClient(stravalib.Client):
 
         # Init the normal stravalib client with remaining args
         super().__init__(*args, **kwargs)
+        
+        # Verify that REST API and Web API correspond to the same Strava user account
+        if self.access_token is not None:
+            rest_id = str(self.get_athlete().id)
+            web_id = self._session.cookies.get('strava_remember_id')
+            if rest_id != web_id:
+                raise stravalib.exc.LoginFailed("'access_token' and 'email' do not correspond to the same account")
+        else:
+            # REST API does not have an access_token (yet). Should we verify the match after
+            # exchange_code_for_token()?
+            pass
 
     def _login(self, email, password):
         """Log into the website"""
