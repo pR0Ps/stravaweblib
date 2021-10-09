@@ -241,9 +241,9 @@ class WebClient(stravalib.Client):
             if len(cells) < 7:
                 continue
 
-            # Parse and convert from km to m
-            # TODO: Will this ever be anything but km?
-            distance = int(float(text[5].strip(" km").replace(',', '')) * 1000)
+            # Parse distance (convert to m from mi/km)
+            mul = 1609.34708 if text[5].endswith("mi") else 1000
+            distance = int(float(text[5].rstrip(" kmi").replace(",", "")) * mul)
 
             component_id = cells[6].find('a', text="Delete")['href'].rsplit("/", 1)[-1]
 
