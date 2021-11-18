@@ -29,6 +29,11 @@ with open(data.filename, 'wb') as f:
         if not chunk:
             break
         f.write(chunk)
+
+# Serialize and recreate WebClient without logging in again
+args = client.client_args
+del client
+client = WebClient(**client_args)
 ```
 
 ### Delete activities

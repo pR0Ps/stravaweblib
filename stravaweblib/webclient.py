@@ -1,9 +1,10 @@
+from base64 import b64decode
 import cgi
 from collections import namedtuple
 from datetime import date, datetime
 import functools
 import enum
-import re
+import json
 
 import requests
 import stravalib
@@ -54,18 +55,32 @@ class WebClient(stravalib.Client):
     def __init__(self, *args, **kwargs):
         # Docstring set manually after class definition
 
-        email = kwargs.pop("email", None)
-        password = kwargs.pop("password", None)
-        if not email or not password:
-            raise ValueError("'email' and 'password' kwargs are required")
+        self._csrf = kwargs.pop("csrf", {})
+        strava_remember_token = kwargs.pop("strava_remember_token", None)
 
-        self._csrf = {}
-        self._component_data = {}
+        if strava_remember_token and self._csrf:
+            # This is a JWT containing a key 'sub' which must be copied
+            # into 'strava_remember_id' for the web interface to accept it.
+            try:
+                web_id = str(int(json.loads(b64decode(strava_remember_token.split('.')[1])).get('sub')))
+            except Exception as e:
+                raise ValueError("'strava_remember_token' does not have expected format")
+        else:
+            web_id = None
+            email = kwargs.pop("email", None)
+            password = kwargs.pop("password", None)
+            if not email or not password:
+                raise ValueError("'email' and 'password' kwargs are required")
+
         self._session = requests.Session()
         self._session.headers.update({
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         })
-        self._login(email, password)
+        if strava_remember_token and web_id:
+            self._session.cookies.set('strava_remember_id', web_id, domain='.strava.com', secure=True)
+            self._session.cookies.set('strava_remember_token', strava_remember_token, domain='.strava.com', secure=True)
+        else:
+            self._login(email, password)
 
         # Init the normal stravalib client with remaining args
         super().__init__(*args, **kwargs)
@@ -80,6 +95,21 @@ class WebClient(stravalib.Client):
             # REST API does not have an access_token (yet). Should we verify the match after
             # exchange_code_for_token()?
             pass
+
+    def __repr__(self):
+        return '{}.{}({})'.format(
+            self.__class__.__module__, self.__class__.__name__,
+            ', '.join('{}={!r}'.format(*kv) for kv in self.client_args.items()))
+
+    @property
+    def client_args(self):
+        args = {
+            'csrf': self._csrf,
+            'strava_remember_token': self._session.cookies.get('strava_remember_token'),
+        }
+        if self.access_token is not None:
+            args['access_token'] = self.access_token
+        return args
 
     def _login(self, email, password):
         """Log into the website"""
