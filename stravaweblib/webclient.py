@@ -4,6 +4,7 @@ import cgi
 from collections import namedtuple
 from datetime import datetime
 import functools
+import html
 import json
 import logging
 import re
@@ -16,7 +17,8 @@ import stravalib
 from stravalib.model import Activity, Bike as _Bike
 from stravaweblib.model import (DataFormat, ScrapedShoe, Bike, ScrapedBike,
                                 ScrapedBikeComponent, ScrapedActivity,
-                                ScrapedActivityPhoto, ScrapedAthlete)
+                                ScrapedActivityPhoto, Athlete, ScrapedAthlete,
+                                ScrapedChallenge, FrameType)
 
 
 __log__ = logging.getLogger(__name__)
@@ -33,6 +35,8 @@ PHOTOS_REGEX = re.compile(r"var\s+photosJson\s*=\s*(\[.*\]);")
 ATHLETE_REGEX = re.compile(r"var\s+currentAthlete\s*=\s*new\s+Strava.Models.CurrentAthlete\(({.*})\);")
 CHALLENGE_IDS_REGEX = re.compile(r"var\s+trophiesAnalyticsProperties\s*=\s*{.*challenge_id:\s*\[(\[[\d\s,]*\])\]")
 PAGE_VIEW_REGEX = re.compile(r"pageView\s*=\s*new\s+Strava.Labs.Activities.Pages.(\S+)PageView\([\"']?\d+[\"']?,\s*[\"']([^\"']+)")
+CHALLENGE_REGEX = re.compile(r"var\s+challenge\s*=\s*new\s+Strava.Models.Challenge\(({.*})\);")
+CHALLENGE_DATE_REGEX = re.compile(r"(\S{3} \d{2}, \d{4}) to (\S{3} \d{2}, \d{4})")
 
 NON_NUMBERS = re.compile(r'[^\d\.]')
 
@@ -498,6 +502,8 @@ class ScrapingClient:
                 # Strip non-number chars ("kg")
                 # TODO: other units?
                 v = float(NON_NUMBERS.sub('', v))
+            elif k == "frame_type":
+                v = FrameType.from_str(v)
             ret[k.lower()] = v
 
         # Get component data
@@ -610,6 +616,14 @@ class ScrapingClient:
         except (TypeError, ValueError) as e:
             raise ScrapingError("Failed to parse shoe data") from e
 
+    def get_all_gear(self):
+        """Scrape all gear information from Strava
+
+        :yield: `ScrapedBike` and `ScrapedShoe` objects
+        """
+        yield from self.get_all_bikes()
+        yield from self.get_all_shoes()
+
     def get_gear(self, gear_id):
         """A scraping-based replacement for `stravalib.Client.get_gear`"""
         try:
@@ -632,7 +646,10 @@ class ScrapingClient:
         if not resp.ok:
             raise stravalib.exc.Fault("Failed to get athlete {}".format(athlete_id))
 
-        ret = {}
+        ret = {
+            "photos": [],
+            "challenges": [],
+        }
         soup = BeautifulSoup(resp.text, 'html5lib')
 
         for script in soup.find_all("script"):
@@ -727,6 +744,71 @@ class ScrapingClient:
 
         return ScrapedAthlete(bind_client=self, **ret)
 
+    def get_challenge(self, challenge_id):
+        """Get data about a challenge"""
+        __log__.debug("Getting details for challenge %s", challenge_id)
+        resp = self.request_get("challenges/{}".format(challenge_id))
+        if not resp.ok:
+            raise stravalib.exc.Fault("Failed to get challenge {}".format(challenge_id))
+
+        data = {}
+        soup = BeautifulSoup(resp.text, 'html5lib')
+        react_data = soup.find("div", **{"data-react-class": "Show"})
+        if react_data:
+            # Extract data from the react version of the page
+            data_str = html.unescape(
+                react_data["data-react-props"]
+                    .replace("&nbsp;", " ")
+                    .replace("\n", "\\n")
+            )
+            try:
+                data = json.loads(data_str)
+            except (TypeError, ValueError) as e:
+                raise ScrapingError("Failed to parse extracted challenge data") from e
+
+            # Get the descript
+            description_html = next(x for x in data["sections"] if x["title"] == "Overview")["content"][0]["text"].replace("&nbsp;", "")
+            data["description"] = BeautifulSoup(description_html, 'html5lib').text
+            data["name"] = data["header"]["name"]
+            data["subtitle"] = data["header"]["subtitle"]
+            data["teaser"] = data["summary"]["challenge"]["title"]
+            data["badge_url"] = data["header"]["challengeLogoUrl"]
+            data["share_url"] = "https://www.strava.com/challenges/{}".format(challenge_id)
+
+            m = CHALLENGE_DATE_REGEX.search(data["summary"]["calendar"]["title"])
+            if m:
+                try:
+                    data["start_date"], data["end_date"] = [
+                        datetime.strptime(x, "%b %d, %Y") for x in m.groups()
+                    ]
+                except ValueError:
+                    __log__.error("Failed to parse dates {}".format(m.groups()))
+        else:
+            # Look for the data in the older-style page
+            for script in soup.find_all("script"):
+                if "Strava.Models.Challenge" in script.text:
+                    break
+            else:
+                raise ScrapingError("Failed to scrape challenge data {}".format(challenge_id))
+
+            m = CHALLENGE_REGEX.search(script.text)
+            if not m:
+                raise ScrapingError("Failed to extract challenge data from page")
+
+            data_str = html.unescape(m.group(1))
+            try:
+                data = json.loads(data_str)
+            except (TypeError, ValueError) as e:
+                raise ScrapingError("Failed to parse extracted challenge data") from e
+
+            desc = soup.find("div", id="desc")
+            if desc:
+                data["description"] = desc.text
+
+        data["id"] = challenge_id
+
+        return ScrapedChallenge(**data)
+
 
 class WebClient(stravalib.Client):
     """
@@ -740,7 +822,7 @@ class WebClient(stravalib.Client):
         self = super().__new__(cls)
 
         # Prepend some docstrings with the parent classes one
-        for fcn in ("__init__", "get_gear"):
+        for fcn in ("__init__", "get_gear", "get_athlete"):
             getattr(cls, fcn).__doc__ = getattr(super(), fcn).__doc__ + getattr(cls, fcn).__doc__
 
         # Delegate certain methods and properties to the scraper instance
@@ -775,14 +857,39 @@ class WebClient(stravalib.Client):
         if self._scraper.athlete_id != self.get_athlete().id:
             raise ValueError("API and web credentials are for different accounts")
 
+    def get_athlete(self, athlete_id=None):
+        """
+        Returned Athletes will have scraped attributes lazily added.
+        Also, when accessing the bikes attribute, more scraped data will be available
+        """
+        athlete = super().get_athlete(athlete_id)
+        # TODO: Should make the bind client this instance
+        #       That way scraping/API functions can be mixed
+        return Athlete(bind_client=self._scraper).from_object(athlete)
+
     def get_gear(self, gear_id):
         """
         Returned Bikes will have scraped attributes lazily added
         """
         gear = super().get_gear(gear_id)
         if isinstance(gear, _Bike):
-            return Bike(bind_client=self._scraper, **gear.to_dict())
+            # TODO: Should make the bind client this instance
+            #       That way scraping/API functions can be mixed
+            return Bike(bind_client=self._scraper).from_object(gear)
         return gear
+
+    def get_all_gear(self):
+        """Get all gear information from Strava
+
+        :yield: `stravalib.model.Bike` and `stravalib.model.Shoe` instances
+        """
+        athlete = self.get_athlete()
+        if athlete.bikes is None and athlete.shoes is None:
+            __log__.error("Failed to get gear data (missing profile:read_all scope?)")
+            return
+
+        for gear in athlete.bikes + athlete.shoes:
+            yield self.get_gear(gear)
 
     @staticmethod
     def _delegate(clazz, name):

@@ -5,8 +5,9 @@ from datetime import date, datetime
 
 from stravalib.attributes import (Attribute, DateAttribute, TimestampAttribute,
                                   TimeIntervalAttribute, LocationAttribute)
-from stravalib.model import (BaseEntity, BoundEntity, LoadableEntity,
-                             EntityCollection, Bike as _Bike)
+from stravalib.model import (BaseEntity, BoundEntity, LoadableEntity as _LoadableEntity,
+                             IdentifiableEntity, EntityCollection, EntityAttribute,
+                             Athlete as _Athlete, Bike as _Bike)
 from stravalib import unithelper as uh
 
 
@@ -111,10 +112,18 @@ class LazyLoaded(metaclass=MetaLazy):
                     cache is stored on the parent class. When this attribute is
                     requested and the key in not in the cache, the `load_attribute`
                     function on the parent class is called and the result is
-                    added to the cache. At this point, the key is popped out of
-                    the cache and set as the attribute variable. If the key is
-                    not in the cache, `None` is set at the value of the attribute.
+                    added to the cache. Any future accesses will return the value
+                    from the cache. If the key is not in the cache, `None` is
+                    returned.
         :param property: Don't store the result of the lazy load
+
+        Special cases:
+         - If a lazy-loaded attribute is None, lazy-loading will be attempted
+           each time it is accessed. This allows for null values to be updated
+           with new data.
+         - If the load_attribute function returns None for a property, it will
+           not be attempted again.
+
         """
         if not (bool(fcn) ^ bool(key)):
             raise ValueError("One of fcn or key (not both) is required")
@@ -129,24 +138,27 @@ class LazyLoaded(metaclass=MetaLazy):
         )
 
     def __get__(self, obj, clazz):
-        if obj is not None and (self._property or obj not in self.data):
-            if self._fcn:
-                # Call the provided function to load the attribute
-                value = self._fcn(obj)
-            elif self._key:
-                if not hasattr(obj, "_lazyload_cache"):
-                    obj._lazyload_cache = {}
+        if obj is None or not (self._property or self.data.get(obj) is None):
+            return super().__get__(obj, clazz)
 
-                # Use obj.load_attribute() to ensure the object is in the cache
-                if self._key not in obj._lazyload_cache:
-                    obj._lazyload_cache.update(obj.load_attribute(self._key) or {})
-                value = obj._lazyload_cache.pop(self._key, None)
+        if self._fcn:
+            # Call the provided function to load the attribute
+            value = self._fcn(obj)
+            if value is not None and not self._property:
+                self.__set__(obj, value)
+            return value
+        elif self._key:
+            if not hasattr(obj, "_lazyload_cache"):
+                obj._lazyload_cache = {}
 
-            if self._property:
-                return value
+            # Use obj.load_attribute() to ensure the object is in the cache
+            if self._key not in obj._lazyload_cache:
+                obj._lazyload_cache.update(obj.load_attribute(self._key) or {})
 
-            self.__set__(obj, value)
-        return super().__get__(obj, clazz)
+            # Don't set it on the object, keep accessing out of the cache
+            return obj._lazyload_cache.get(self._key, None)
+
+        raise AssertionError("No fcn or key?")
 
     def __set__(self, obj, val):
         if self._property:
@@ -154,6 +166,13 @@ class LazyLoaded(metaclass=MetaLazy):
                 "Can't set {} property on {!r}".format(self.__class__.__name__, obj)
             )
         super().__set__(obj, val)
+
+
+# TODO: probably delete this
+class LoadableEntity(_LoadableEntity):
+
+    def load_attribute(self, key):
+        return {}
 
 
 class ScrapedGear(BaseEntity):
@@ -219,20 +238,16 @@ class ScrapedBikeComponent(BaseEntity):
         )
 
 
-class _BikeData(LoadableEntity):
+class _ScrapedBikeData(LoadableEntity):
     """Mixin class to add weight and components to a Bike"""
-    frame_type = LazyLoaded(Attribute(FrameType), key="frame_type")
+
     components = LazyLoaded(EntityCollection(ScrapedBikeComponent), key="components")
     weight = LazyLoaded(Attribute(float, units=uh.kg), key="weight")
 
-    def load_attribute(self, _):
+    def load_attribute(self, key):
         """Expand the bike with more details using scraping"""
         self.assert_bind_client()
-
-        d = self.bind_client.get_bike_details(self.id)
-        # Upgrade the frame_type to the enum
-        _dict_modify(d, "frame_type", "frame_type", fcn=lambda x: FrameType.from_str(x))
-        return d
+        return self.bind_client.get_bike_details(self.id)
 
     def components_on_date(self, on_date):
         """Get bike components installed on the specified date
@@ -252,17 +267,28 @@ class _BikeData(LoadableEntity):
         ]
 
 
-class Bike(_BikeData, _Bike) :
+class Bike(_ScrapedBikeData, _Bike) :
     __doc__ = _Bike.__doc__ + """
     Scraping adds weight and components attributes
     """
 
+    def from_object(self, b):
+        self.from_dict(b.to_dict())
+        return self
 
-class ScrapedBike(ScrapedGear, _BikeData):
+
+class ScrapedBike(ScrapedGear, _ScrapedBikeData):
     """Represents a bike scraped from Strava
 
     The attributes are compatible with stravalib.models.Bike where they exist.
     """
+    # NOTE: These are here to take advantage of the load_attributes function
+    #       of the _ScrapedBikeData class in case the ScrapedBike was
+    #       constructed from a regular bike without the attributes set.
+    frame_type = LazyLoaded(Attribute(FrameType), key="frame_type")
+    brand_name = LazyLoaded(Attribute(str), key="brand_name")
+    model_name = LazyLoaded(Attribute(str), key="model_name")
+    description = LazyLoaded(Attribute(str), key="description")
 
 
 class ScrapedActivityPhoto(BaseEntity):
@@ -333,7 +359,10 @@ class ScrapedActivity(LoadableEntity):
     photos = LazyLoaded(EntityCollection(ScrapedActivityPhoto), key="photos")
     device_name = LazyLoaded(Attribute(str), key="device_name")
 
-    def load_attribute(self, _):
+    def load_attribute(self, key):
+        if key not in {"manual", "photos", "device_name"}:
+            return super().load_attribute(key)
+
         self.assert_bind_client()
         return self.bind_client.get_extra_activity_details(self.id)
 
@@ -355,14 +384,44 @@ class ScrapedActivity(LoadableEntity):
         return super().from_dict(d)
 
 
-class ScrapedAthlete(LoadableEntity):
-    """
-    Represents Athlete data scraped from the website
+class ScrapedChallenge(IdentifiableEntity):
 
-    The attributes are compatible with stravalib.model.Athlete where they exist
-    """
-    firstname = Attribute(str)
-    lastname = Attribute(str)
+    url = Attribute(str)
+    name = Attribute(str)
+    subtitle = Attribute(str)
+    teaser = Attribute(str)
+    overview = Attribute(str)
+    badge_url = Attribute(str)
+
+    start_date = TimestampAttribute()
+    end_date = TimestampAttribute()
+
+    def trophy_url(self, percent_complete=100):
+        """Return a url for a trophy image for the percentage complete
+
+        Note that not all challenges have images for all percentages. Using
+        100 should always work.
+        """
+        if not self.badge_url:
+            return
+        base, ext = self.badge_url.rsplit(".", 1)
+        return "{}-{}.{}".format(base, percent_complete, ext)
+
+    def from_dict(self, d):
+        #_dict_modify(d, "title", "name")
+        _dict_modify(d, "description", "overview")
+        _dict_modify(d, "url", "badge_url")
+        _dict_modify(d, "share_url", "url")
+        return super().from_dict(d)
+
+
+class _AthleteData(LoadableEntity):
+    """Mixin class to add photos, challenges, and a name to an Athlete"""
+    photos = LazyLoaded(EntityCollection(ScrapedActivityPhoto), key="photos")
+    challenges = LazyLoaded(Attribute(list), key="challenges")
+    bikes = LazyLoaded(EntityCollection(ScrapedBike), key="bikes")
+    shoes = LazyLoaded(EntityCollection(ScrapedShoe), key="shoes")
+
     # Dynamically compute the display name in the same way Strava does
     name = LazyLoaded(
         Attribute(str),
@@ -370,27 +429,47 @@ class ScrapedAthlete(LoadableEntity):
         property=True
     )
 
-    profile = Attribute(str)
-    photos = EntityCollection(ScrapedActivityPhoto)
-    challenges = Attribute(list)
+    def load_attribute(self, key):
+        self.assert_bind_client()
 
+        # TODO: bikes and shoes only returns scraping-based data
+        if key == "bikes":
+            return {"bikes": self.bind_client.get_all_bikes(self.id)}
+        elif key == "shoes":
+            return {"shoes": self.bind_client.get_all_shoes(self.id)}
+        elif key in {"photos", "challenges"}:
+            d = self.bind_client.get_athlete(self.id)
+            return {
+                "photos": d.photos,
+                "challenges": d.challenges,
+            }
+        else:
+            return super().load_attribute(key)
+
+
+class Athlete(_AthleteData, _Athlete):
+    __doc__ = _Athlete.__doc__ + """
+    Scraping adds photos, challenges, and name attributes
+    """
+    def from_object(self, a):
+        self.from_dict(a.to_dict())
+        return self
+
+
+class ScrapedAthlete(_AthleteData):
+    """
+    Represents Athlete data scraped from the website
+
+    The attributes are compatible with stravalib.model.Athlete where they exist
+    """
+    firstname = Attribute(str)
+    lastname = Attribute(str)
+
+    profile = Attribute(str)
     city = Attribute(str)
     state = Attribute(str)
     country = Attribute(str)
     location = LocationAttribute()
-
-    bikes = LazyLoaded(EntityCollection(ScrapedBike), key="bikes")
-    shoes = LazyLoaded(EntityCollection(ScrapedShoe), key="shoes")
-
-    def load_attribute(self, key):
-        self.assert_bind_client()
-        if key == "bikes":
-            v = self.bind_client.get_all_bikes(self.id)
-        elif key == "shoes":
-            v = self.bind_client.get_all_shoes(self.id)
-        else:
-            return
-        return {key: v}
 
     def from_dict(self, d):
         # Merge geo subdict into the main dict
