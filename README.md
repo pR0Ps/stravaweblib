@@ -70,7 +70,7 @@ bike_id = bikes[0].id
 client.get_bike_components(bike_id)
 
 # Get the current components on the first bike
-client.get_bike_components(bike_id, date=datetime.now())
+client.get_bike_components(bike_id, on_date=datetime.now())
 ```
 
 License
