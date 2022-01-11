@@ -2,13 +2,14 @@ from base64 import b64decode
 import cgi
 from collections import namedtuple
 from datetime import date, datetime
-import functools
 import enum
+import functools
 import json
+import time
 
+from bs4 import BeautifulSoup
 import requests
 import stravalib
-from bs4 import BeautifulSoup
 
 
 __all__ = ["WebClient", "FrameType", "DataFormat", "ActivityFile"]
@@ -55,70 +56,55 @@ class WebClient(stravalib.Client):
     def __init__(self, *args, **kwargs):
         # Docstring set manually after class definition
 
-        self._csrf = kwargs.pop("csrf", {})
-        strava_remember_token = kwargs.pop("strava_remember_token", None)
+        jwt = kwargs.pop("jwt", None)
+        email = kwargs.pop("email", None)
+        password = kwargs.pop("password", None)
 
-        if strava_remember_token and self._csrf:
-            # This is a JWT containing a key 'sub' which must be copied
-            # into 'strava_remember_id' for the web interface to accept it.
-            try:
-                web_id = str(int(json.loads(b64decode(strava_remember_token.split('.')[1])).get('sub')))
-            except Exception as e:
-                raise ValueError("'strava_remember_token' does not have expected format")
-        else:
-            web_id = None
-            email = kwargs.pop("email", None)
-            password = kwargs.pop("password", None)
-            if not email or not password:
-                raise ValueError("'email' and 'password' kwargs are required")
+        self._csrf = kwargs.pop("csrf", None)
 
         self._session = requests.Session()
         self._session.headers.update({
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         })
-        if strava_remember_token and web_id:
-            self._session.cookies.set('strava_remember_id', web_id, domain='.strava.com', secure=True)
-            self._session.cookies.set('strava_remember_token', strava_remember_token, domain='.strava.com', secure=True)
+
+        if jwt:
+            self._login_with_jwt(jwt)
+        elif email and password:
+            self._login_with_password(email, password)
         else:
-            self._login(email, password)
+            raise ValueError("'jwt' or both of 'email' and 'password' are required")
 
         # Init the normal stravalib client with remaining args
         super().__init__(*args, **kwargs)
-        
+
         # Verify that REST API and Web API correspond to the same Strava user account
         if self.access_token is not None:
             rest_id = str(self.get_athlete().id)
             web_id = self._session.cookies.get('strava_remember_id')
             if rest_id != web_id:
-                raise stravalib.exc.LoginFailed("'access_token' and 'email' do not correspond to the same account")
+                raise stravalib.exc.LoginFailed("API and web credentials are for different accounts")
         else:
             # REST API does not have an access_token (yet). Should we verify the match after
             # exchange_code_for_token()?
             pass
 
-    def __repr__(self):
-        return '{}.{}({})'.format(
-            self.__class__.__module__, self.__class__.__name__,
-            ', '.join('{}={!r}'.format(*kv) for kv in self.client_args.items()))
+    @property
+    def jwt(self):
+        return self._session.cookies.get('strava_remember_token')
 
     @property
-    def client_args(self):
-        args = {
-            'csrf': self._csrf,
-            'strava_remember_token': self._session.cookies.get('strava_remember_token'),
-        }
-        if self.access_token is not None:
-            args['access_token'] = self.access_token
-        return args
+    def csrf(self):
+        if not self._csrf:
+            self._csrf = self._get_csrf_token()
+        return self._csrf
 
-    def _login(self, email, password):
-        """Log into the website"""
+    def _get_csrf_token(self):
+        """Get a CSRF token
 
-        login_url = "{}/login".format(BASE_URL)
-        session_url = "{}/session".format(BASE_URL)
-
-        # Get CSRF token
-        login_html = self._session.get(login_url).text
+        Uses the about page because it's small and doesn't redirect based
+        on if the client is logged in or not.
+        """
+        login_html = self._session.get("{}/about".format(BASE_URL)).text
         soup = BeautifulSoup(login_html, 'html5lib')
 
         try:
@@ -128,18 +114,44 @@ class WebClient(stravalib.Client):
         except (AttributeError, KeyError):
             # "AttributeError: 'NoneType' object has no attr..." when failing
             # to find the tags.
-            raise stravalib.exc.LoginFailed("Couldn't find CSRF token")
+            raise stravalib.exc.Fault("Couldn't find CSRF token")
 
-        # Save csrf token to use throughout the session
-        self._csrf = {csrf_param: csrf_token}
-        post_info = {
-            "email": email,
-            "password": password,
-            "remember_me": "on",
-            **self._csrf
-        }
-        resp = self._session.post(session_url, allow_redirects=False, data=post_info)
-        if not resp.is_redirect or resp.next.url == login_url:
+        return {csrf_param: csrf_token}
+
+    def _login_with_jwt(self, jwt):
+        """Log in using the strava_remember_token (a JWT) from a previous session"""
+        # The JWT's 'sub' key contains the id of the account. This must be
+        # extracted and set as the 'strava_remember_id' cookie.
+        try:
+            payload = jwt.split('.')[1]  # header.payload.signature
+            payload += "=" * (4 - len(payload) % 4)  # ensure correct padding
+            data = json.loads(b64decode(payload))
+        except Exception:
+            raise ValueError("Failed to parse JWT payload")
+
+        try:
+            if data["exp"] < time.time():
+                raise ValueError("JWT has expired")
+            web_id = str(data["sub"])
+        except KeyError:
+            raise ValueError("Failed to extract required data from the JWT")
+
+        self._session.cookies.set('strava_remember_id', web_id, domain='.strava.com', secure=True)
+        self._session.cookies.set('strava_remember_token', jwt, domain='.strava.com', secure=True)
+
+    def _login_with_password(self, email, password):
+        """Log into the website using a username and password"""
+        resp = self._session.post(
+            "{}/session".format(BASE_URL),
+            allow_redirects=False,
+            data={
+                "email": email,
+                "password": password,
+                "remember_me": "on",
+                **self.csrf
+            }
+        )
+        if not resp.is_redirect or resp.next.url == "{}/login".format(BASE_URL):
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
 
     def delete_activity(self, activity_id):
@@ -149,9 +161,14 @@ class WebClient(stravalib.Client):
         :param activity_id: The activity to delete.
         :type activity_id: int
         """
-        url = "{}/activities/{}".format(BASE_URL, activity_id)
-        resp = self._session.post(url, allow_redirects=False,
-                                  data={"_method": "delete", **self._csrf})
+        resp = self._session.post(
+            "{}/activities/{}".format(BASE_URL, activity_id),
+            allow_redirects=False,
+            data={
+                "_method": "delete",
+                **self.csrf
+            }
+        )
 
         if not resp.is_redirect or resp.next.url != "{}/athlete/training".format(BASE_URL):
             raise stravalib.exc.Fault(
@@ -200,7 +217,6 @@ class WebClient(stravalib.Client):
             if json_fmt == DataFormat.ORIGINAL.value:
                 raise ValueError("`json_fmt` parameter cannot be DataFormat.ORIGINAL")
             return self.get_activity_data(activity_id, fmt=json_fmt)
-
 
         # Get file name from request (if possible)
         content_disposition = resp.headers.get('content-disposition', "")
@@ -319,4 +335,13 @@ WebClient.__init__.__doc__ = stravalib.Client.__init__.__doc__ + \
 
         :param password: The password of the account to log into
         :type password: str
+
+        :param jwt: The JWT of an existing session.
+                    If not specified, email and password are required.
+        :type jwt: str
+
+        :param csrf: A dict of the form: `{<csrf-param>: <csrf-token>}`.
+                     If not provided, will be scraped from the about page.
+                     Can be accessed from the `.csrf` property.
+        :type csrf: dict
         """
