@@ -4,6 +4,31 @@ stravaweblib
 Provides all the functionality of the [stravalib](https://github.com/hozn/stravalib) package and
 extends it using web scraping.
 
+Authentication
+--------------
+In order to log into the website, the `WebClient` class either needs an email and password, or the
+[JWT](https://en.wikipedia.org/wiki/JSON_Web_Token) of an existing session. Strava stores this JWT
+in the `strava_remember_token` cookie.
+
+After the client has logged in, a JWT for the current session can be accessed via the `WebClient`'s
+`jwt` property. Storing this JWT (and the `access_token` from `stravalib`) allows for resuming the
+session without having to log in again. This can avoid rate limits and lockouts.
+
+Example:
+```python
+from stravaweblib import WebClient
+
+# Log in (requires API token and email/password for the site)
+client = WebClient(access_token=OAUTH_TOKEN, email=EMAIL, password=PASSWORD)
+
+# Store the current session's information
+jwt = client.jwt
+access_token = client.access_token
+
+# Create a new client that continues to use the previous web session
+client = WebClient(access_token=access_token, jwt=jwt)
+```
+
 Extra functionality
 -------------------
 
