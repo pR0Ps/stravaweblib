@@ -320,8 +320,10 @@ class ScrapedActivityPhoto(BaseEntity):
                 str(min(dim.values())): d.pop(name)
                 for name, dim in d.pop("dimensions").items()
             }
-        if "lat" in d and "lng" in d:
-            d["location"] = [d.pop("lat"), d.pop("lng")]
+        lat = d.pop("lat", None)
+        lon = d.pop("lng", None)
+        if lat is not None and lon is not None:
+            d["location"] = [lat, lon]
 
         return super().from_dict(d)
 
