@@ -246,8 +246,9 @@ class _ScrapedBikeData(LoadableEntity):
 
     def load_attribute(self, key):
         """Expand the bike with more details using scraping"""
-        self.assert_bind_client()
-        return self.bind_client.get_bike_details(self.id)
+        if self.id is not None:
+            self.assert_bind_client()
+            return self.bind_client.get_bike_details(self.id)
 
     def components_on_date(self, on_date):
         """Get bike components installed on the specified date

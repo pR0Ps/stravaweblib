@@ -719,13 +719,7 @@ class ScrapingClient:
 
                 for row in gear.find("table").find_all("tr"):
                     name, dist = row.find_all("td")
-                    link=name.find("a")
-                    gear_id = None
-                    if link and type_ == "bikes":
-                        gear_id = "b{}".format(link["href"].rsplit("/", 1)[-1])
-
                     ret[type_].append(cls(
-                        id=gear_id,
                         name=name.text.strip(),
                         distance=int(float(NON_NUMBERS.sub('', dist.text.strip())) * 1000),
                     ))
