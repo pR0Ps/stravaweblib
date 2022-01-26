@@ -195,25 +195,22 @@ class ScrapingClient:
                 ret["device_name"] = device.text.strip()
 
         for script in soup.find_all("script"):
-            if "var pageView;" in script.text:
-                m = PAGE_VIEW_REGEX.search(script.text)
-                if not m:
-                    __log__.error("Failed to extract manual and type data from page")
-                    continue
+            if not script.string:
+                continue
+
+            m = PAGE_VIEW_REGEX.search(script.string)
+            if m:
                 ret["manual"] = m.group(1).lower() == "manual"
                 ret["type"] = m.group(2)
+                continue
 
-            elif "var photosJson" in script.text:
-                m = PHOTOS_REGEX.search(script.text)
-                if not m:
-                    __log__.error("Failed to extract photo data from page")
-                    continue
+            m = PHOTOS_REGEX.search(script.string)
+            if m:
                 try:
-                    photos = json.loads(m.group(1))
+                    ret["photos"] = [ScrapedActivityPhoto(**p) for p in json.loads(m.group(1))]
                 except (TypeError, ValueError) as e:
                     __log__.error("Failed to parse extracted photo data", exc_info=True)
-                    continue
-                ret["photos"] = [ScrapedActivityPhoto(**p) for p in photos]
+                continue
 
         return ret
 
@@ -647,53 +644,46 @@ class ScrapingClient:
             raise stravalib.exc.Fault("Failed to get athlete {}".format(athlete_id))
 
         ret = {
+            "id": athlete_id,
             "photos": [],
             "challenges": [],
         }
+
         soup = BeautifulSoup(resp.text, 'html5lib')
 
         for script in soup.find_all("script"):
-            # This method only works on the currently-logged in athlete but
-            # returns much more data.
-            if athlete_id == self.athlete_id and "Strava.Models.CurrentAthlete" in script.text:
-                m = ATHLETE_REGEX.search(script.text)
-                if not m:
-                    __log__.error("Failed to extract detailed athlete data")
-                    continue
-                try:
-                    ret.update(json.loads(m.group(1)))
-                except (TypeError, ValueError) as e:
-                    __log__.error("Failed to parse extracted athlete data", exc_info=True)
+            data = script.string
+            if not data:
+                continue
+
+            # This method only works on the currently-logged in athlete but returns much more data than the above
+            if athlete_id == self.athlete_id:
+                m = ATHLETE_REGEX.search(data)
+                if m:
+                    try:
+                        ret.update(json.loads(m.group(1)))
+                    except (TypeError, ValueError) as e:
+                        __log__.error("Failed to parse extracted athlete data", exc_info=True)
                     continue
 
-            elif "var trophiesAnalyticsProperties" in script.text:
-                m = CHALLENGE_IDS_REGEX.search(script.text)
-                if not m:
-                    __log__.error("Failed to extract completed challenges")
-                    continue
+            m = CHALLENGE_IDS_REGEX.search(data)
+            if m:
                 try:
                     ret["challenges"] = json.loads(m.group(1))
                 except (TypeError, ValueError) as e:
                     __log__.error("Failed to parse extracted challenge data", exc_info=True)
-                    continue
+                continue
 
-            elif "var photosJson" in script.text:
-                # Exact same as activity pages
-                m = PHOTOS_REGEX.search(script.text)
-                if not m:
-                    __log__.error("Failed to extract photo data from page")
-                    break
+            m = PHOTOS_REGEX.search(data)
+            if m:
                 try:
-                    photos = json.loads(m.group(1))
+                    ret["photos"] = [ScrapedActivityPhoto(**p) for p in json.loads(m.group(1))]
                 except (TypeError, ValueError) as e:
                     __log__.error("Failed to parse extracted photo data", exc_info=True)
-                    break
-                ret["photos"] = [ScrapedActivityPhoto(**p) for p in photos]
+                continue
 
-        # Failed the detailed scrape or not getting the currently-logged in athlete
-        # (this method works for all athletes)
-        if "id" not in ret:
-            ret["id"] = athlete_id
+        if athlete_id != self.athlete_id:
+            # Get basic profile data for an athlete.
             # There are multiple headings depending on the level of access
             for heading in soup.find_all("div", class_="profile-heading"):
                 name = heading.find("h1", class_="athlete-name")
@@ -702,21 +692,19 @@ class ScrapingClient:
 
                 location = heading.find("div", class_="location")
                 if location:
-                    ret["city"], ret["state"], ret["country"] = [x.strip() for x in location.text.split(",")]
+                    ret["city"], ret["state"], ret["country"] = [x.strip() for x in location.text.split(",", 2)]
 
                 profile = heading.find("img", class_="avatar-img")
                 if profile:
                     ret["profile"] = profile["src"]
 
-        # Scrape basic gear info from the sidebar if not getting the logged
-        # in athlete.
-        # By providing minimal data for non-logged-in athletes, no more data
-        # will be lazy-loaded by the bikes and shoes attributes. This is what
-        # we want since the lazy-load would just call this function again.
-        # However, when getting the logged in athlete's gear, we don't want to
-        # set anything since the lazy-load will use the more detailed
-        # get_all_bikes/gear functions instead of this one.
-        if athlete_id != self.athlete_id:
+            # Get basic gear info from the sidebar.
+            # By providing minimal data for non-logged-in athletes, no more data
+            # will be lazy-loaded by the bikes and shoes attributes. This is what
+            # we want since the lazy-load would just call this function again.
+            # However, when getting the logged in athlete's gear, we don't want to
+            # set anything since the lazy-load will use the more detailed
+            # get_all_bikes/gear functions instead of this one.
             ret["bikes"] = []
             ret["shoes"] = []
             for gear in soup.select("div.section.stats.gear"):
@@ -766,7 +754,7 @@ class ScrapingClient:
             except (TypeError, ValueError) as e:
                 raise ScrapingError("Failed to parse extracted challenge data") from e
 
-            # Get the descript
+            # Get the description
             description_html = next(x for x in data["sections"] if x["title"] == "Overview")["content"][0]["text"].replace("&nbsp;", "")
             data["description"] = BeautifulSoup(description_html, 'html5lib').text
             data["name"] = data["header"]["name"]
@@ -786,24 +774,25 @@ class ScrapingClient:
         else:
             # Look for the data in the older-style page
             for script in soup.find_all("script"):
-                if "Strava.Models.Challenge" in script.text:
-                    break
-            else:
-                raise ScrapingError("Failed to scrape challenge data {}".format(challenge_id))
+                if not script.string:
+                    continue
 
-            m = CHALLENGE_REGEX.search(script.text)
-            if not m:
-                raise ScrapingError("Failed to extract challenge data from page")
+                m = CHALLENGE_REGEX.search(script.string)
+                if not m:
+                    continue
 
-            data_str = html.unescape(m.group(1))
-            try:
-                data = json.loads(data_str)
-            except (TypeError, ValueError) as e:
-                raise ScrapingError("Failed to parse extracted challenge data") from e
+                data_str = html.unescape(m.group(1))
+                try:
+                    data = json.loads(data_str)
+                except (TypeError, ValueError) as e:
+                    raise ScrapingError("Failed to parse extracted challenge data") from e
 
-            desc = soup.find("div", id="desc")
-            if desc:
-                data["description"] = desc.text
+                desc = soup.find("div", id="desc")
+                if desc:
+                    data["description"] = desc.text
+
+        if not data:
+            raise ScrapingError("Failed to scrape challenge data {}".format(challenge_id))
 
         data["id"] = challenge_id
 

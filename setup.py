@@ -38,6 +38,6 @@ setup(
     python_requires=">=3.4.0",
     install_requires=[
         "stravalib>=0.10.4,<1.0.0",
-        "beautifulsoup4>=4.6.0,<5.0.0",
+        "beautifulsoup4>=4.9.0,<5.0.0",
     ],
 )
