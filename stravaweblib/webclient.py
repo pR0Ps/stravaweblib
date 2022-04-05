@@ -105,7 +105,7 @@ class WebClient(stravalib.Client):
         on if the client is logged in or not.
         """
         login_html = self._session.get("{}/about".format(BASE_URL)).text
-        soup = BeautifulSoup(login_html, 'html5lib')
+        soup = BeautifulSoup(login_html, 'html.parser')
 
         try:
             head = soup.head
@@ -271,7 +271,7 @@ class WebClient(stravalib.Client):
                 "Failed to load bike details page (status code: {})".format(resp.status_code),
             )
 
-        soup = BeautifulSoup(resp.text, 'html5lib')
+        soup = BeautifulSoup(resp.text, 'html.parser')
         for table in soup.find_all('table'):
             if table.find('thead'):
                 break
