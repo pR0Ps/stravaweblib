@@ -19,6 +19,7 @@ BASE_URL = "https://www.strava.com"
 
 
 ActivityFile = namedtuple("ActivityFile", ("filename", "content"))
+RouteFile = namedtuple("RouteFile", ("filename", "content"))
 
 
 class DataFormat(enum.Enum):
@@ -326,6 +327,48 @@ class WebClient(stravalib.Client):
                     (c['added'] or date.min) <= on_date <= (c['removed'] or date.max)]
         else:
             return components
+
+    def get_route_data(self, route_id, fmt: DataFormat = DataFormat.GPX):
+        """
+        Get a file containing the provided route's data
+
+        The returned data can be either a GPX file, or a TCX file.
+
+        :param route_id: The route to retrieve.
+        :type route_id: int
+
+        :param fmt: The format to request the data in. DataFormat.ORIGINAL is mapped to DataFormat.GPX
+                    (defaults to DataFormat.GPX).
+        :type fmt: :class:`DataFormat`
+
+        :return: A namedtuple with `filename` and `content` attributes:
+                 - `filename` is the filename that Strava suggests for the file
+                 - `contents` is an iterator that yields file contents as bytes
+        :rtype: :class:`RouteFile`
+        """
+        fmt = fmt if fmt != DataFormat.ORIGINAL else DataFormat.GPX  # map "original" -> "gpx"
+        fmt = DataFormat.classify(fmt)
+        url = "{}/routes/{}/export_{}".format(BASE_URL, route_id, fmt)
+        resp = self._session.get(url, stream=True, allow_redirects=False)
+        if resp.status_code != 200:
+            raise stravalib.exc.Fault("Status code '{}' received when trying "
+                                      "to download a route"
+                                      "".format(resp.status_code))
+
+        # Get file name from request (if possible)
+        content_disposition = resp.headers.get('content-disposition', "")
+        filename = cgi.parse_header(content_disposition)[1].get('filename')
+
+        # Sane default for filename
+        if not filename:
+            filename = str(route_id)
+
+        if "." not in filename:
+            filename += f'.{fmt}'
+
+        # Return the filename and an iterator to download the file with
+        return RouteFile(filename=filename, content=resp.iter_content(chunk_size = 16384))
+
 
 # Inherit parent documentation for WebClient.__init__
 WebClient.__init__.__doc__ = stravalib.Client.__init__.__doc__ + \
