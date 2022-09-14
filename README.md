@@ -43,7 +43,7 @@ client = WebClient(access_token=OAUTH_TOKEN, email=EMAIL, password=PASSWORD)
 
 # Get the first activity id (uses the normal stravalib API)
 activities = client.get_activities()
-activity_id = activities[0].id
+activity_id = activities.next().id
 
 # Get the filename and data stream for the activity data
 data = client.get_activity_data(activity_id, fmt=DataFormat.ORIGINAL)
@@ -68,7 +68,7 @@ client = WebClient(access_token=OAUTH_TOKEN, email=EMAIL, password=PASSWORD)
 
 # Get the first activity id (uses the normal stravalib API)
 activities = client.get_activities()
-activity_id = activities[0].id
+activity_id = activities.next().id
 
 # Delete the activity
 client.delete_activity(activity_id)
@@ -89,7 +89,7 @@ athlete = client.get_athlete()
 bikes = athlete.bikes
 
 # Get the id of the first bike
-bike_id = bikes[0].id
+bike_id = bikes.next().id
 
 # Get all components of the first bike (past and present)
 client.get_bike_components(bike_id)
@@ -97,6 +97,31 @@ client.get_bike_components(bike_id)
 # Get the current components on the first bike
 client.get_bike_components(bike_id, on_date=datetime.now())
 ```
+
+### Export Routes
+Download route files as GPX or TCX.
+
+```python
+from stravaweblib import WebClient, DataFormat
+
+# Log in (requires API token and email/password for the site)
+client = WebClient(access_token=OAUTH_TOKEN, email=EMAIL, password=PASSWORD)
+
+# Get the first route id (uses the normal stravalib API)
+routes = client.get_routes()
+route_id = routes.next().id
+
+# Get the filename and data stream for the activity data
+data = client.get_route_data(route_id, fmt=DataFormat.GPX)
+
+# Save the activity data to disk using the server-provided filename
+with open(data.filename, 'wb') as f:
+    for chunk in data.content:
+        if not chunk:
+            break
+        f.write(chunk)
+```
+
 
 License
 =======
