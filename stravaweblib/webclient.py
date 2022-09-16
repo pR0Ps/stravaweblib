@@ -12,13 +12,14 @@ import requests
 import stravalib
 
 
-__all__ = ["WebClient", "FrameType", "DataFormat", "ActivityFile"]
+__all__ = ["WebClient", "FrameType", "DataFormat", "ExportFile", "ActivityFile"]
 
 
 BASE_URL = "https://www.strava.com"
 
 
-ActivityFile = namedtuple("ActivityFile", ("filename", "content"))
+ExportFile = namedtuple("ExportFile", ("filename", "content"))
+ActivityFile = ExportFile  # TODO: deprecate and remove
 
 
 class DataFormat(enum.Enum):
@@ -175,6 +176,31 @@ class WebClient(stravalib.Client):
                 "Failed to delete activity (status code: {})".format(resp.status_code),
             )
 
+    @staticmethod
+    def _make_export_file(resp, id_):
+        # Get file name from request (if possible)
+        content_disposition = resp.headers.get("content-disposition", "")
+        filename = cgi.parse_header(content_disposition)[1].get("filename")
+
+        # Sane default for filename
+        if not filename:
+            filename = str(id_)
+
+        # Note that Strava always removes periods from the filename so if one
+        # exists we know it's for the extension
+        if "." not in filename:
+            if fmt is DataFormat.ORIGINAL:
+                ext = 'dat'
+            else:
+                ext = fmt
+            filename = "{}.{}".format(filename, ext)
+
+        # Return the filename and an iterator to download the file with
+        return ExportFile(
+            filename=filename,
+            content=resp.iter_content(chunk_size=16*1024)  # 16KB
+        )
+
     def get_activity_data(self, activity_id, fmt=DataFormat.ORIGINAL,
                           json_fmt=None):
         """
@@ -200,7 +226,7 @@ class WebClient(stravalib.Client):
         :return: A namedtuple with `filename` and `content` attributes:
                  - `filename` is the filename that Strava suggests for the file
                  - `contents` is an iterator that yields file contents as bytes
-        :rtype: :class:`ActivityFile`
+        :rtype: :class:`ExportFile`
         """
         fmt = DataFormat.classify(fmt)
         url = "{}/activities/{}/export_{}".format(BASE_URL, activity_id, fmt)
@@ -218,26 +244,7 @@ class WebClient(stravalib.Client):
                 raise ValueError("`json_fmt` parameter cannot be DataFormat.ORIGINAL")
             return self.get_activity_data(activity_id, fmt=json_fmt)
 
-        # Get file name from request (if possible)
-        content_disposition = resp.headers.get('content-disposition', "")
-        filename = cgi.parse_header(content_disposition)[1].get('filename')
-
-        # Sane default for filename
-        if not filename:
-            filename = str(activity_id)
-
-        # Note that Strava always removes periods from the filename so if one
-        # exists we know it's for the extension
-        if "." not in filename:
-            if fmt == DataFormat.ORIGINAL:
-                ext = 'dat'
-            else:
-                ext = fmt
-            filename = "{}.{}".format(filename, ext)
-
-        # Return the filename and an iterator to download the file with
-        return ActivityFile(filename=filename,
-                            content=resp.iter_content(chunk_size=16384))
+        return self._make_export_file(resp, activity_id)
 
     def _parse_date(self, date_str):
         if not date_str:
@@ -326,6 +333,36 @@ class WebClient(stravalib.Client):
                     (c['added'] or date.min) <= on_date <= (c['removed'] or date.max)]
         else:
             return components
+
+    def get_route_data(self, route_id, fmt=DataFormat.GPX):
+        """
+        Get a file containing the provided route's data
+
+        The returned data can be either a GPX file, or a TCX file.
+
+        :param route_id: The route to retrieve.
+        :type route_id: int
+
+        :param fmt: The format to request the data in. DataFormat.ORIGINAL is mapped to DataFormat.GPX
+                    (defaults to DataFormat.GPX).
+        :type fmt: :class:`DataFormat`
+
+        :return: A namedtuple with `filename` and `content` attributes:
+                 - `filename` is the filename that Strava suggests for the file
+                 - `contents` is an iterator that yields file contents as bytes
+        :rtype: :class:`ExportFile`
+        """
+        fmt = DataFormat.classify(DataFormat.GPX if fmt is DataFormat.ORIGINAL else fmt)
+        url = "{}/routes/{}/export_{}".format(BASE_URL, route_id, fmt)
+        resp = self._session.get(url, stream=True, allow_redirects=False)
+        if resp.status_code != 200:
+            raise stravalib.exc.Fault("Status code '{}' received when trying "
+                                      "to download a route"
+                                      "".format(resp.status_code))
+
+        return self._make_export_file(resp, route_id)
+
+
 
 # Inherit parent documentation for WebClient.__init__
 WebClient.__init__.__doc__ = stravalib.Client.__init__.__doc__ + \
