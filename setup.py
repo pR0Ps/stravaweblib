@@ -37,7 +37,7 @@ setup(
     packages=["stravaweblib"],
     python_requires=">=3.4.0",
     install_requires=[
-        "stravalib>=0.6.6,<1.0.0",
-        "beautifulsoup4>=4.6.0,<5.0.0",
+        "stravalib>=0.10.4,<1.0.0",
+        "beautifulsoup4>=4.9.0,<5.0.0",
     ],
 )
