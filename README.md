@@ -50,10 +50,7 @@ data = client.get_activity_data(activity_id, fmt=DataFormat.ORIGINAL)
 
 # Save the activity data to disk using the server-provided filename
 with open(data.filename, 'wb') as f:
-    for chunk in data.content:
-        if not chunk:
-            break
-        f.write(chunk)
+    f.writelines(data.content)
 ```
 
 ### Delete activities
@@ -98,7 +95,7 @@ client.get_bike_components(bike_id)
 client.get_bike_components(bike_id, on_date=datetime.now())
 ```
 
-### Export Routes
+### Export routes
 Download route files as GPX or TCX.
 
 ```python
@@ -116,10 +113,7 @@ data = client.get_route_data(route_id, fmt=DataFormat.GPX)
 
 # Save the activity data to disk using the server-provided filename
 with open(data.filename, 'wb') as f:
-    for chunk in data.content:
-        if not chunk:
-            break
-        f.write(chunk)
+    f.writelines(data.content)
 ```
 
 
