@@ -43,6 +43,7 @@ class FrameType(enum.Enum):
     CROSS_BIKE = 2
     ROAD_BIKE = 3
     TIME_TRIAL_BIKE = 4
+    GRAVEL_BIKE = 5
 
     def __str__(self):
         return str(self.name).replace("_", " ").title()
