@@ -14,7 +14,7 @@ except Exception:
 
 setup(
     name="stravaweblib",
-    version="0.0.8",
+    version="0.0.9",
     description="Extends the Strava v3 API using web scraping",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -37,7 +37,7 @@ setup(
     packages=["stravaweblib"],
     python_requires=">=3.4.0",
     install_requires=[
-        "stravalib>=0.6.6,<1.0.0",
+        "stravalib>=0.6.6,<2.0.0",
         "beautifulsoup4>=4.6.0,<5.0.0",
     ],
 )
