@@ -141,6 +141,15 @@ class WebClient(stravalib.Client):
         self._session.cookies.set('strava_remember_id', web_id, domain='.strava.com', secure=True)
         self._session.cookies.set('strava_remember_token', jwt, domain='.strava.com', secure=True)
 
+        # make a request to the "/me" endpoint and ensure it redirects to the
+        # correct athlete ID. This ensures we're logged in to the correct account
+        resp = self._session.get(
+            "{}/me".format(BASE_URL),
+            allow_redirects=False,
+        )
+        if not resp.is_redirect or not resp.next.url.endswith("/{}".format(web_id)):
+            raise stravalib.exc.LoginFailed("Couldn't access website after setting JWT token, check token")
+
     def _login_with_password(self, email, password):
         """Log into the website using a username and password"""
         resp = self._session.post(
