@@ -1,4 +1,4 @@
-from base64 import b64decode
+from base64 import b64decode, b64encode
 from collections import namedtuple
 from datetime import date, datetime
 from email.message import Message
@@ -6,6 +6,9 @@ import enum
 import functools
 import json
 import time
+import urllib.parse
+from textwrap import dedent
+from xml.sax.saxutils import escape, quoteattr
 
 from bs4 import BeautifulSoup
 import requests
@@ -15,7 +18,9 @@ import stravalib
 __all__ = ["WebClient", "FrameType", "DataFormat", "ExportFile", "ActivityFile"]
 
 
-BASE_URL = "https://www.strava.com"
+BASE_DOMAIN = "www.strava.com"
+BASE_URL = f"https://{BASE_DOMAIN}"
+NENE_URL = "https://nene.strava.com"
 
 
 ExportFile = namedtuple("ExportFile", ("filename", "content"))
@@ -78,6 +83,7 @@ class WebClient(stravalib.Client):
         # Docstring set manually after class definition
 
         jwt = kwargs.pop("jwt", None)
+        strava4_session = kwargs.pop("strava4_session", None)
         email = kwargs.pop("email", None)
         password = kwargs.pop("password", None)
 
@@ -85,15 +91,18 @@ class WebClient(stravalib.Client):
 
         self._session = requests.Session()
         self._session.headers.update({
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
         })
 
         if jwt:
-            self._login_with_jwt(jwt)
+            web_id = self._login_with_jwt(jwt)
+        elif strava4_session:
+            web_id = self._login_with_strava4_session_cookie(strava4_session, email)
         elif email and password:
-            self._login_with_password(email, password)
+            web_id = self._login_with_password(email, password)
         else:
-            raise ValueError("'jwt' or both of 'email' and 'password' are required")
+            raise ValueError("Either 'strava4_session', or 'jwt', or both of 'email' and 'password' are required")
 
         # Init the normal stravalib client with remaining args
         super().__init__(*args, **kwargs)
@@ -101,7 +110,6 @@ class WebClient(stravalib.Client):
         # Verify that REST API and Web API correspond to the same Strava user account
         if self.access_token is not None:
             rest_id = str(self.get_athlete().id)
-            web_id = self._session.cookies.get('strava_remember_id')
             if rest_id != web_id:
                 raise stravalib.exc.LoginFailed("API and web credentials are for different accounts")
         else:
@@ -112,6 +120,10 @@ class WebClient(stravalib.Client):
     @property
     def jwt(self):
         return self._session.cookies.get('strava_remember_token')
+
+    @property
+    def strava4_session(self):
+        return self._session.cookies.get('_strava4_session')
 
     @property
     def csrf(self):
@@ -168,6 +180,24 @@ class WebClient(stravalib.Client):
         )
         if not resp.is_redirect or not resp.next.url.endswith("/{}".format(web_id)):
             raise stravalib.exc.LoginFailed("Couldn't access website after setting JWT token, check token")
+        return web_id
+
+    def _login_with_strava4_session_cookie(self, cookie, email=None):
+        """Log in using the _strava4_session cookie and user email address from a previous session"""
+        self._session.cookies.set('_currentH', b64encode(BASE_DOMAIN.encode()).decode(), domain='.strava.com', secure=True)
+        self._session.cookies.set('_strava4_session', cookie, domain='.strava.com', secure=True)
+        if email is not None:
+            self._session.cookies.set('iterableEndUserId', urllib.parse.quote(email), domain='.strava.com', secure=True)
+
+        # make a request to the "/me" endpoint and ensure it redirects to the
+        # correct athlete ID. This ensures we're logged in to the correct account
+        resp = self._session.get(
+            "{}/me".format(BASE_URL),
+            allow_redirects=False,
+        )
+        if not resp.is_redirect or not resp.next.url.startswith(f"{BASE_URL}/athletes/"):
+            raise stravalib.exc.LoginFailed("Couldn't access website after setting _strava4_session, check token")
+        return resp.next.url.removeprefix(f"{BASE_URL}/athletes/")
 
     def _login_with_password(self, email, password):
         """Log into the website using a username and password"""
@@ -183,6 +213,16 @@ class WebClient(stravalib.Client):
         )
         if not resp.is_redirect or resp.next.url == "{}/login".format(BASE_URL):
             raise stravalib.exc.LoginFailed("Couldn't log in to website, check creds")
+
+        # make a request to the "/me" endpoint and ensure it redirects to the
+        # correct athlete ID. This ensures we're logged in to the correct account
+        resp = self._session.get(
+            "{}/me".format(BASE_URL),
+            allow_redirects=False,
+        )
+        if not resp.is_redirect or not resp.next.url.startswith(f"{BASE_URL}/athletes/"):
+            raise stravalib.exc.LoginFailed("Couldn't access website after username and password login")
+        return resp.next.url.removeprefix(f"{BASE_URL}/athletes/")
 
     def delete_activity(self, activity_id):
         """
@@ -395,6 +435,18 @@ class WebClient(stravalib.Client):
 # Inherit parent documentation for WebClient.__init__
 WebClient.__init__.__doc__ = stravalib.Client.__init__.__doc__ + \
         """
+        As of October 2026, there are three known methods to authenticate to the
+        Strava web interface, as opposed to the Strava API:
+
+        1. With the user's email address and password. This method likely
+           stopped working in 2025 (see https://github.com/pR0Ps/stravaweblib/issues/15)
+        2. With the user's "strava_remember_token" cookie from an existing
+           browser session. This is a long string containing a JSON Web Token (JWT).
+           This method likely stopped working in 2026.
+        3. With the user's "_strava4_session" cookie from an existing
+           browser session. This is a shorter alphanumeric string. This method
+           appears to be currently working.
+
         :param email: The email of the account to log into
         :type email: str
 
@@ -402,8 +454,10 @@ WebClient.__init__.__doc__ = stravalib.Client.__init__.__doc__ + \
         :type password: str
 
         :param jwt: The JWT of an existing session.
-                    If not specified, email and password are required.
         :type jwt: str
+
+        :param strava4_session: The _strava4_session cookie of an existing session.
+        :type strava4_session: str
 
         :param csrf: A dict of the form: `{<csrf-param>: <csrf-token>}`.
                      If not provided, will be scraped from the about page.
